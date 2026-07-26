@@ -76,6 +76,7 @@ fn trusted_retained_metadata_accepts_the_closed_codec_request() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines, clippy::similar_names)]
 fn generated_schema_item_is_typed_and_dead_stripped_by_exact_reachability() {
     let reachable = analyze(
         "namespace Example.Models\n\
@@ -139,7 +140,7 @@ fn generated_schema_item_is_typed_and_dead_stripped_by_exact_reachability() {
         .iter()
         .find(|function| function.symbol() == adapter.encode_entry().symbol())
         .expect("ordinary generated encode MIR function");
-    assert!(encode.blocks().iter().flat_map(|block| block.instructions()).any(|instruction| {
+    assert!(encode.blocks().iter().flat_map(pop_mir::MirBlock::instructions).any(|instruction| {
         matches!(instruction.kind(), MirInstructionKind::CodecEncode { adapter: found, .. } if *found == adapter.symbol())
     }));
     let decode = reachable_mir
@@ -147,7 +148,7 @@ fn generated_schema_item_is_typed_and_dead_stripped_by_exact_reachability() {
         .iter()
         .find(|function| function.symbol() == adapter.decode_entry().symbol())
         .expect("ordinary generated decode MIR function");
-    assert!(decode.blocks().iter().flat_map(|block| block.instructions()).any(|instruction| {
+    assert!(decode.blocks().iter().flat_map(pop_mir::MirBlock::instructions).any(|instruction| {
         matches!(instruction.kind(), MirInstructionKind::CodecDecode { adapter: found, .. } if *found == adapter.symbol())
     }));
     assert!(reachable_mir.dump().contains("codec.schema"));
@@ -182,6 +183,7 @@ fn generated_schema_item_is_typed_and_dead_stripped_by_exact_reachability() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn codec_error_cases_are_source_resolvable_and_exhaustively_matchable() {
     let result = analyze(
         "namespace Example\n\

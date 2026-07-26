@@ -148,6 +148,50 @@ fn repeated_worker_pool_shutdown_does_not_leave_live_jobs() {
 }
 
 #[test]
+fn production_profile_returns_with_mature_worker_work_in_flight() {
+    let mut runtime = GenerationalRuntime::production_with_background_workers(
+        BackgroundWorkerConfig::new(2, 8).expect("worker config"),
+    )
+    .expect("production collector workers");
+    assert_eq!(
+        runtime.contract(),
+        pop_runtime_interface::GarbageCollectorContract::pop_v1()
+    );
+    let request = mature_object(&[0]);
+    let owner = runtime.allocate_object(&request).expect("owner");
+    let first = runtime
+        .allocate_object(&mature_object(&[]))
+        .expect("first target");
+    let second = runtime
+        .allocate_object(&mature_object(&[]))
+        .expect("second target");
+    runtime
+        .store_reference(owner, ObjectSlot::new(0), Some(first))
+        .expect("snapshot edge");
+    let owner_root = runtime.retain_root(owner).expect("owner root");
+    let mut roots = no_stack_roots(90);
+    runtime.request_major_collection();
+
+    let first_slice = runtime.safe_point(&mut roots).expect("dispatch mark slice");
+    assert!(first_slice.collection().is_none());
+    assert!(
+        runtime.background_work_in_flight(),
+        "safe point must return while immutable mark work remains on host workers"
+    );
+    runtime
+        .store_reference(owner, ObjectSlot::new(0), Some(second))
+        .expect("mutator store while mark batch is in flight");
+
+    finish_major(&mut runtime, &mut roots);
+    assert!(runtime.contains(first), "SATB snapshot edge survives");
+    assert!(runtime.contains(second), "post-scan edge survives");
+    assert!(!runtime.background_work_in_flight());
+    runtime
+        .release_root(owner_root)
+        .expect("release owner root");
+}
+
+#[test]
 fn dirty_cards_are_refined_by_workers_before_minor_evacuation() {
     let config = BackgroundWorkerConfig::new(2, 2).expect("worker configuration");
     let mut runtime =
@@ -183,4 +227,119 @@ fn dirty_cards_are_refined_by_workers_before_minor_evacuation() {
     runtime
         .release_root(owner_root)
         .expect("release owner root");
+}
+
+#[test]
+fn production_card_refinement_restarts_after_an_overlapped_mutator_store() {
+    let config = BackgroundWorkerConfig::new(2, 2).expect("worker configuration");
+    let mut runtime =
+        GenerationalRuntime::production_with_background_workers(config).expect("production");
+    let owner = runtime
+        .allocate_object(&mature_object(&[0]))
+        .expect("mature owner");
+    let first = runtime
+        .allocate_object(&young_object())
+        .expect("first young child");
+    let second = runtime
+        .allocate_object(&young_object())
+        .expect("second young child");
+    runtime
+        .store_reference(owner, ObjectSlot::new(0), Some(first))
+        .expect("first mature-to-young edge");
+    let owner_root = runtime.retain_root(owner).expect("owner root");
+    let mut roots = no_stack_roots(91);
+    runtime.request_minor_collection();
+
+    assert!(
+        runtime
+            .safe_point(&mut roots)
+            .expect("dispatch card refinement")
+            .collection()
+            .is_none()
+    );
+    assert!(runtime.background_work_in_flight());
+    runtime
+        .store_reference(owner, ObjectSlot::new(0), Some(second))
+        .expect("overlapped card mutation");
+    assert!(
+        runtime
+            .safe_point(&mut roots)
+            .expect("discard stale card result and redispatch")
+            .collection()
+            .is_none()
+    );
+    assert!(
+        runtime
+            .safe_point(&mut roots)
+            .expect("collect with current refined card")
+            .collection()
+            .is_some()
+    );
+    assert_eq!(runtime.object_count(), 2);
+    assert!(!runtime.contains(first));
+    assert!(!runtime.contains(second));
+    runtime.release_root(owner_root).expect("release owner");
+}
+
+#[test]
+fn production_overlap_stress_preserves_the_latest_edge_across_restarted_refinement() {
+    let config = BackgroundWorkerConfig::new(2, 4).expect("worker configuration");
+    let mut runtime =
+        GenerationalRuntime::production_with_background_workers(config).expect("production");
+    let owner = runtime
+        .allocate_object(&mature_object(&[0]))
+        .expect("mature owner");
+    let owner_root = runtime.retain_root(owner).expect("owner root");
+    let mut roots = no_stack_roots(92);
+
+    for cycle in 0..64 {
+        let first = runtime
+            .allocate_object(&young_object())
+            .expect("first young child");
+        let second = runtime
+            .allocate_object(&young_object())
+            .expect("second young child");
+        runtime
+            .store_reference(owner, ObjectSlot::new(0), Some(first))
+            .expect("first edge");
+        runtime.request_minor_collection();
+        assert!(
+            runtime
+                .safe_point(&mut roots)
+                .expect("dispatch refinement")
+                .collection()
+                .is_none(),
+            "cycle {cycle} must return with refinement in flight"
+        );
+        runtime
+            .store_reference(owner, ObjectSlot::new(0), Some(second))
+            .expect("overlapped edge");
+
+        let mut collected = false;
+        for _ in 0..4 {
+            if runtime
+                .safe_point(&mut roots)
+                .expect("complete restarted refinement")
+                .collection()
+                .is_some()
+            {
+                collected = true;
+                break;
+            }
+        }
+        assert!(collected, "cycle {cycle} exceeded the bounded retry count");
+        let current = runtime
+            .load_slot_value(owner, ObjectSlot::new(0))
+            .expect("latest edge");
+        assert_ne!(current, first.raw());
+        assert_ne!(current, second.raw());
+        assert!(runtime.contains(pop_runtime_interface::ManagedReference::new(current)));
+    }
+
+    assert!(!runtime.background_work_in_flight());
+    let telemetry = runtime
+        .background_worker_telemetry()
+        .expect("worker telemetry");
+    assert_eq!(telemetry.jobs_submitted(), telemetry.jobs_completed());
+    runtime.release_root(owner_root).expect("release owner");
 }

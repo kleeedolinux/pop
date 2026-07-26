@@ -453,6 +453,11 @@ fn structured_hir_lowers_to_explicit_verified_cfg_in_source_evaluation_order() {
         Vec::new(),
         vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
     ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
     let mir =
         lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
 
@@ -653,6 +658,12 @@ fn typed_results_errors_and_defer_lower_to_explicit_verified_control_flow() {
     ] {
         assert!(dump.contains(operation), "missing {operation}:\n{dump}");
     }
+    assert!(
+        dump.lines()
+            .filter(|line| line.contains("resultMake") || line.contains("errorMake"))
+            .all(|line| line.contains("site#") && line.contains("map[")),
+        "fixed result/error allocations need exact allocation sites and maps:\n{dump}"
+    );
     let forward = mir
         .functions()
         .iter()
@@ -757,7 +768,13 @@ fn fixed_packs_preserve_hir_grouping_and_lower_to_tuple_projection() {
 
     let mir = lower_hir_bubble(hir, front_end.types()).expect("verified MIR");
     let dump = mir.dump();
-    assert!(dump.contains("tupleMake"), "{dump}");
+    assert!(dump.contains("tupleMake site#"), "{dump}");
+    assert!(
+        dump.lines()
+            .filter(|line| line.contains("tupleMake"))
+            .all(|line| line.contains("map[")),
+        "fixed tuple allocations need exact object maps:\n{dump}"
+    );
     assert!(dump.contains("tupleGet 0"), "{dump}");
     assert!(dump.contains("tupleGet 1"), "{dump}");
     assert!(!dump.contains("multipleAssignment"), "{dump}");
@@ -1368,7 +1385,11 @@ fn runtime_type_declarations_survive_mir_lowering_and_round_trip() {
 
     for (malformed, expected) in [
         (
-            dump.replacen("recordMake s1 {field#0=", "recordMake s1 {field#99=", 1),
+            dump.replacen(
+                "recordMake s1 site#1 map[1:] {field#0=",
+                "recordMake s1 site#1 map[1:] {field#99=",
+                1,
+            ),
             "field",
         ),
         (
@@ -1377,8 +1398,8 @@ fn runtime_type_declarations_survive_mir_lowering_and_round_trip() {
         ),
         (
             dump.replacen(
-                "classMake c0 map[1:] {field#1=",
-                "classMake c0 map[1:] {field#99=",
+                "classMake c0 site#1 map[1:] {field#1=",
+                "classMake c0 site#1 map[1:] {field#99=",
                 1,
             ),
             "field",
@@ -1436,6 +1457,92 @@ fn record_defaults_are_materialized_before_verified_mir() {
     let reparsed = parse_mir_dump(&dump).expect("record-default MIR parses");
     assert_eq!(reparsed.dump(), dump);
     assert!(verify_mir_bubble(&reparsed, front_end.types()).is_ok());
+}
+
+#[test]
+fn managed_construction_sites_round_trip_and_duplicates_fail_verification() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/allocationSites.pop",
+        "namespace Main\n\
+         public record Box\n\
+             value: Int\n\
+         end\n\
+         public function sum(): Int\n\
+             local first: Box = { value = 1 }\n\
+             local second: Box = { value = 2 }\n\
+             return first.value + second.value\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("recordMake s0 site#1"), "{dump}");
+    assert!(dump.contains("recordMake s0 site#2"), "{dump}");
+    let reparsed = parse_mir_dump(&dump).expect("allocation-site MIR parses");
+    assert_eq!(reparsed.dump(), dump);
+
+    let duplicate = dump.replacen("recordMake s0 site#2", "recordMake s0 site#1", 1);
+    let duplicate = parse_mir_dump(&duplicate).expect("duplicate-site MIR parses");
+    let errors =
+        verify_mir_bubble(&duplicate, front_end.types()).expect_err("duplicate site rejected");
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        MirVerificationError::DuplicateAllocationSite { site, .. } if site.raw() == 1
+    )));
+}
+
+#[test]
+fn nested_construction_sites_cannot_alias_their_owning_callable() {
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/nestedAllocationSites.pop",
+        "namespace Main\n\
+         public record Box\n\
+             value: Int\n\
+         end\n\
+         public function read(): Int\n\
+             local outer: Box = { value = 1 }\n\
+             local function inner(): Box\n\
+                 return { value = 2 }\n\
+             end\n\
+             local made = inner()\n\
+             return outer.value + made.value\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let mir =
+        lower_hir_bubble(front_end.hir().expect("HIR"), front_end.types()).expect("verified MIR");
+    let dump = mir.dump();
+    assert!(dump.contains("recordMake s0 site#1"), "{dump}");
+    assert!(dump.contains("recordMake s0 site#2"), "{dump}");
+
+    let duplicate = dump.replacen("recordMake s0 site#2", "recordMake s0 site#1", 1);
+    let duplicate = parse_mir_dump(&duplicate).expect("nested duplicate-site MIR parses");
+    let errors = verify_mir_bubble(&duplicate, front_end.types())
+        .expect_err("nested site alias with owner rejected");
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        MirVerificationError::DuplicateAllocationSite { site, .. } if site.raw() == 1
+    )));
 }
 
 #[test]

@@ -6,12 +6,13 @@
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::rc::Rc;
 
 use pop_foundation::{
-    BindingId, BlockId, BorrowRegionId, BuiltinTypeId, CaptureId, ClassId, CleanupScopeId,
-    CoroutineStateId, FieldId, FileId, FunctionId, IterationProtocolMethodId, LifetimeId, LocalId,
-    MethodId, ResultCaseId, SourceSpan, SymbolId, SymbolIdentity, TextRange, TextSize, TypeId,
-    ValueId, ValueParameterId,
+    AllocationSiteId, BindingId, BlockId, BorrowRegionId, BuiltinTypeId, CaptureId, ClassId,
+    CleanupScopeId, CoroutineStateId, FieldId, FileId, FunctionId, IterationProtocolMethodId,
+    LifetimeId, LocalId, MethodId, ResultCaseId, SourceSpan, SymbolId, SymbolIdentity, TextRange,
+    TextSize, TypeId, ValueId, ValueParameterId,
 };
 use pop_hir::{
     HirAssignmentTarget, HirBubble, HirCallDispatch, HirCaptureMode, HirCaptureSource, HirClosure,
@@ -2040,33 +2041,56 @@ fn collect_builtin_interface_effects()
 }
 
 struct LoweringGcSchema {
+    records: BTreeMap<SymbolId, ObjectMap>,
     classes: BTreeMap<ClassId, ObjectMap>,
     fields: BTreeMap<FieldId, (ObjectSlot, TypeId)>,
 }
 
 impl LoweringGcSchema {
     fn new(declarations: &[MirDeclaration], arena: &TypeArena) -> Self {
+        let mut records = BTreeMap::new();
         let mut classes = BTreeMap::new();
         let mut fields = BTreeMap::new();
         for declaration in declarations {
-            let MirDeclarationKind::Class(class) = declaration.kind() else {
-                continue;
-            };
-            let mut reference_slots = Vec::new();
-            for (index, field) in class.fields().iter().enumerate() {
-                let slot = ObjectSlot::new(u32::try_from(index).unwrap_or(u32::MAX));
-                fields.insert(field.field(), (slot, field.field_type()));
-                if is_managed_reference_type_id(field.field_type(), Some(arena)) {
-                    reference_slots.push(slot);
+            match declaration.kind() {
+                MirDeclarationKind::Record(record) => {
+                    let map = field_object_map(record.fields(), arena, &mut fields);
+                    records.insert(declaration.symbol(), map);
                 }
+                MirDeclarationKind::Class(class) => {
+                    let map = field_object_map(class.fields(), arena, &mut fields);
+                    classes.insert(class.class(), map);
+                }
+                _ => {}
             }
-            let slot_count = u32::try_from(class.fields().len()).unwrap_or(u32::MAX);
-            let object_map = ObjectMap::new(slot_count, reference_slots)
-                .expect("class field slots form a valid logical object map");
-            classes.insert(class.class(), object_map);
         }
-        Self { classes, fields }
+        Self {
+            records,
+            classes,
+            fields,
+        }
     }
+}
+
+fn field_object_map(
+    fields: &[MirField],
+    arena: &TypeArena,
+    field_slots: &mut BTreeMap<FieldId, (ObjectSlot, TypeId)>,
+) -> ObjectMap {
+    let reference_slots = fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| {
+            let slot = ObjectSlot::new(u32::try_from(index).unwrap_or(u32::MAX));
+            field_slots.insert(field.field(), (slot, field.field_type()));
+            is_managed_reference_type_id(field.field_type(), Some(arena)).then_some(slot)
+        })
+        .collect();
+    ObjectMap::new(
+        u32::try_from(fields.len()).unwrap_or(u32::MAX),
+        reference_slots,
+    )
+    .expect("aggregate field slots form a valid logical object map")
 }
 
 struct BuildingBlock {
@@ -2182,6 +2206,7 @@ struct FunctionBuilder<'hir> {
     next_cleanup_scope: u32,
     next_coroutine_state: u32,
     next_suspend_safe_point: u32,
+    next_generated_allocation_site: Rc<Cell<u32>>,
     current_cleanup: Option<MirCleanupBlock>,
 }
 
@@ -2810,12 +2835,14 @@ impl<'hir> FunctionBuilder<'hir> {
             method_effects,
             builtin_interface_effects,
             ffi_layouts,
+            Rc::new(Cell::new(1_u32 << 31)),
         )
     }
 
     fn new_closure(
         owner: SymbolId,
         closure: &'hir HirClosure,
+        next_generated_allocation_site: Rc<Cell<u32>>,
         arena: &'hir TypeArena,
         gc_schema: &'hir LoweringGcSchema,
         reference_effects: &'hir BTreeMap<SymbolIdentity, MirEffectSummary>,
@@ -2866,6 +2893,7 @@ impl<'hir> FunctionBuilder<'hir> {
             method_effects,
             builtin_interface_effects,
             ffi_layouts,
+            next_generated_allocation_site,
         )
     }
 
@@ -2887,6 +2915,7 @@ impl<'hir> FunctionBuilder<'hir> {
             MirEffectSummary,
         >,
         ffi_layouts: &'hir MirFfiLayoutCatalog,
+        next_generated_allocation_site: Rc<Cell<u32>>,
     ) -> Self {
         let mut arguments = Vec::new();
         let mut parameters = BTreeMap::new();
@@ -2937,6 +2966,7 @@ impl<'hir> FunctionBuilder<'hir> {
             next_cleanup_scope: 0,
             next_coroutine_state: 0,
             next_suspend_safe_point: 0,
+            next_generated_allocation_site,
             current_cleanup: None,
         }
     }
@@ -3023,6 +3053,7 @@ impl<'hir> FunctionBuilder<'hir> {
             let cell = self.emit(
                 MirInstructionKind::CaptureCellAllocate {
                     binding: BindingId::from_raw(parameter.raw()),
+                    allocation_site: self.fresh_generated_allocation_site(),
                     initial,
                     value_type: type_id,
                     object_map: capture_cell_object_map(self.arena, type_id),
@@ -3053,6 +3084,7 @@ impl<'hir> FunctionBuilder<'hir> {
                         let cell = self.emit(
                             MirInstructionKind::CaptureCellAllocate {
                                 binding: *binding,
+                                allocation_site: self.fresh_generated_allocation_site(),
                                 initial: value,
                                 value_type: *local_type,
                                 object_map: capture_cell_object_map(self.arena, *local_type),
@@ -3080,6 +3112,7 @@ impl<'hir> FunctionBuilder<'hir> {
                             let cell = self.emit(
                                 MirInstructionKind::CaptureCellAllocate {
                                     binding: binding.binding(),
+                                    allocation_site: self.fresh_generated_allocation_site(),
                                     initial: projected,
                                     value_type: binding.local_type(),
                                     object_map: capture_cell_object_map(
@@ -4508,6 +4541,7 @@ impl<'hir> FunctionBuilder<'hir> {
                 let cell = self.emit(
                     MirInstructionKind::CaptureCellAllocate {
                         binding: binding.binding(),
+                        allocation_site: self.fresh_generated_allocation_site(),
                         initial: value,
                         value_type: binding.local_type(),
                         object_map: capture_cell_object_map(self.arena, binding.local_type()),
@@ -4740,12 +4774,18 @@ impl<'hir> FunctionBuilder<'hir> {
             HirExpressionKind::Function(function) => {
                 MirInstructionKind::FunctionReference(*function)
             }
-            HirExpressionKind::Tuple(elements) => MirInstructionKind::TupleMake(
-                elements
+            HirExpressionKind::Tuple(elements) => MirInstructionKind::TupleMake {
+                allocation_site: self.fresh_generated_allocation_site(),
+                elements: elements
                     .iter()
                     .map(|element| self.lower_expression(element))
                     .collect(),
-            ),
+                object_map: fixed_object_map(
+                    self.arena,
+                    elements.iter().map(HirExpression::type_id),
+                    0,
+                ),
+            },
             HirExpressionKind::StringConcat { left, right } => MirInstructionKind::StringConcat {
                 left: self.lower_expression(left),
                 right: self.lower_expression(right),
@@ -5389,22 +5429,37 @@ impl<'hir> FunctionBuilder<'hir> {
                     step: self.lower_expression(step),
                 }
             }
-            HirExpressionKind::Record { record, fields } => MirInstructionKind::RecordMake {
+            HirExpressionKind::Record {
+                record,
+                allocation_site,
+                fields,
+            } => MirInstructionKind::RecordMake {
                 record: *record,
+                allocation_site: *allocation_site,
                 fields: self.lower_fields(fields),
+                object_map: self
+                    .gc_schema
+                    .records
+                    .get(record)
+                    .cloned()
+                    .expect("verified record construction has a GC schema"),
             },
-            HirExpressionKind::ClassConstruct { class, fields, .. } => {
-                MirInstructionKind::ClassMake {
-                    class: *class,
-                    fields: self.lower_fields(fields),
-                    object_map: self
-                        .gc_schema
-                        .classes
-                        .get(class)
-                        .cloned()
-                        .expect("verified class construction has a GC schema"),
-                }
-            }
+            HirExpressionKind::ClassConstruct {
+                class,
+                allocation_site,
+                fields,
+                ..
+            } => MirInstructionKind::ClassMake {
+                class: *class,
+                allocation_site: *allocation_site,
+                fields: self.lower_fields(fields),
+                object_map: self
+                    .gc_schema
+                    .classes
+                    .get(class)
+                    .cloned()
+                    .expect("verified class construction has a GC schema"),
+            },
             HirExpressionKind::RecordUpdate {
                 record,
                 base,
@@ -5413,8 +5468,15 @@ impl<'hir> FunctionBuilder<'hir> {
                 let base = self.lower_expression(base);
                 MirInstructionKind::RecordUpdate {
                     record: *record,
+                    allocation_site: self.fresh_generated_allocation_site(),
                     base,
                     fields: self.lower_fields(fields),
+                    object_map: self
+                        .gc_schema
+                        .records
+                        .get(record)
+                        .cloned()
+                        .expect("verified record update has a GC schema"),
                 }
             }
             HirExpressionKind::UnionCase {
@@ -5424,10 +5486,16 @@ impl<'hir> FunctionBuilder<'hir> {
             } => MirInstructionKind::UnionMake {
                 union: *union,
                 case: *case,
+                allocation_site: self.fresh_generated_allocation_site(),
                 arguments: arguments
                     .iter()
                     .map(|argument| self.lower_expression(argument))
                     .collect(),
+                object_map: fixed_object_map(
+                    self.arena,
+                    arguments.iter().map(HirExpression::type_id),
+                    1,
+                ),
             },
             HirExpressionKind::ResultCase {
                 result,
@@ -5436,10 +5504,16 @@ impl<'hir> FunctionBuilder<'hir> {
             } => MirInstructionKind::ResultMake {
                 result: *result,
                 case: *case,
+                allocation_site: self.fresh_generated_allocation_site(),
                 arguments: arguments
                     .iter()
                     .map(|argument| self.lower_expression(argument))
                     .collect(),
+                object_map: fixed_object_map(
+                    self.arena,
+                    arguments.iter().map(HirExpression::type_id),
+                    1,
+                ),
             },
             HirExpressionKind::IterationCase {
                 iteration,
@@ -5448,10 +5522,16 @@ impl<'hir> FunctionBuilder<'hir> {
             } => MirInstructionKind::IterationMake {
                 iteration: *iteration,
                 case: *case,
+                allocation_site: self.fresh_generated_allocation_site(),
                 arguments: arguments
                     .iter()
                     .map(|argument| self.lower_expression(argument))
                     .collect(),
+                object_map: fixed_object_map(
+                    self.arena,
+                    arguments.iter().map(HirExpression::type_id),
+                    1,
+                ),
             },
             HirExpressionKind::ErrorCase {
                 error,
@@ -5460,10 +5540,16 @@ impl<'hir> FunctionBuilder<'hir> {
             } => MirInstructionKind::ErrorMake {
                 error: *error,
                 case: *case,
+                allocation_site: self.fresh_generated_allocation_site(),
                 arguments: arguments
                     .iter()
                     .map(|argument| self.lower_expression(argument))
                     .collect(),
+                object_map: fixed_object_map(
+                    self.arena,
+                    arguments.iter().map(HirExpression::type_id),
+                    1,
+                ),
             },
         };
         self.emit(kind, expression.type_id(), expression.span())
@@ -5476,6 +5562,7 @@ impl<'hir> FunctionBuilder<'hir> {
         let (lowered, mut nested) = FunctionBuilder::new_closure(
             self.owner,
             closure,
+            Rc::clone(&self.next_generated_allocation_site),
             self.arena,
             self.gc_schema,
             self.reference_effects,
@@ -5561,6 +5648,7 @@ impl<'hir> FunctionBuilder<'hir> {
             MirInstructionKind::ClosureEnvironmentAllocate {
                 owner: self.owner,
                 function: closure.function(),
+                allocation_site: self.fresh_generated_allocation_site(),
                 captures,
                 object_map,
             },
@@ -5872,7 +5960,9 @@ impl<'hir> FunctionBuilder<'hir> {
             MirInstructionKind::ResultMake {
                 result: result_definition,
                 case: ResultCaseId::from_raw(1),
+                allocation_site: self.fresh_generated_allocation_site(),
                 arguments: vec![error],
+                object_map: fixed_object_map(self.arena, [error_type], 1),
             },
             enclosing_result,
             span,
@@ -6379,6 +6469,15 @@ impl<'hir> FunctionBuilder<'hir> {
         value
     }
 
+    fn fresh_generated_allocation_site(&self) -> AllocationSiteId {
+        let raw = self.next_generated_allocation_site.get();
+        self.next_generated_allocation_site.set(
+            raw.checked_add(1)
+                .expect("generated allocation-site identity space exhausted"),
+        );
+        AllocationSiteId::from_raw(raw)
+    }
+
     fn emit_effect(&mut self, kind: MirInstructionKind, span: SourceSpan) {
         let (kind, unwind) = self.attach_cleanup_unwind(kind);
         let instruction = ValueId::from_raw(self.next_value);
@@ -6780,17 +6879,43 @@ fn capture_cell_object_map(arena: &TypeArena, value_type: TypeId) -> ObjectMap {
     ObjectMap::new(1, references).expect("one-slot capture cell map is canonical")
 }
 
+fn fixed_object_map(
+    arena: &TypeArena,
+    field_types: impl IntoIterator<Item = TypeId>,
+    scalar_prefix_slots: u32,
+) -> ObjectMap {
+    let field_types = field_types.into_iter().collect::<Vec<_>>();
+    let references = field_types
+        .iter()
+        .enumerate()
+        .filter(|(_, type_id)| is_managed_reference_type_id(**type_id, Some(arena)))
+        .map(|(index, _)| {
+            ObjectSlot::new(
+                scalar_prefix_slots.saturating_add(u32::try_from(index).unwrap_or(u32::MAX)),
+            )
+        })
+        .collect();
+    ObjectMap::new(
+        scalar_prefix_slots.saturating_add(u32::try_from(field_types.len()).unwrap_or(u32::MAX)),
+        references,
+    )
+    .expect("fixed managed construction has a canonical logical object map")
+}
+
 fn closure_environment_object_map(arena: &TypeArena, captures: &[MirClosureCapture]) -> ObjectMap {
     let references = captures
         .iter()
         .filter(|capture| {
-            capture.mode == MirCaptureMode::Cell
+            capture.self_reference
+                || capture.mode == MirCaptureMode::Cell
                 || is_managed_reference_type_id(capture.type_id, Some(arena))
         })
-        .map(|capture| ObjectSlot::new(capture.slot))
+        .map(|capture| ObjectSlot::new(capture.slot.saturating_add(1)))
         .collect();
     ObjectMap::new(
-        u32::try_from(captures.len()).unwrap_or(u32::MAX),
+        u32::try_from(captures.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1),
         references,
     )
     .expect("closure captures form a valid logical object map")
@@ -6937,7 +7062,7 @@ pub(crate) fn local_instruction_effects(kind: &MirInstructionKind) -> MirEffectS
             }
         }
         MirInstructionKind::FunctionReference(_)
-        | MirInstructionKind::TupleMake(_)
+        | MirInstructionKind::TupleMake { .. }
         | MirInstructionKind::ArrayMake { .. }
         | MirInstructionKind::TableMake { .. }
         | MirInstructionKind::ClassMake { .. }

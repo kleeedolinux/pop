@@ -240,6 +240,10 @@ impl HirBubble {
     /// Attaches the artifact-verified public nominal descriptor projection.
     /// The catalog carries no names or member inventory and is therefore not
     /// a reflection surface.
+    ///
+    /// # Errors
+    ///
+    /// Rejects descriptors from undeclared dependency Bubbles.
     pub fn with_nominal_references(
         mut self,
         catalog: HirNominalReferenceCatalog,
@@ -3477,7 +3481,7 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
         HirExpressionKind::OptionalNarrow { optional } => {
             remap_aggregate_expression(optional, instances);
         }
-        HirExpressionKind::Record { record, fields } => {
+        HirExpressionKind::Record { record, fields, .. } => {
             if let Some(instance) = instances.symbol(expression.type_id) {
                 *record = instance;
             }
@@ -3490,6 +3494,7 @@ fn remap_aggregate_expression(expression: &mut HirExpression, instances: &HirDat
             class,
             definition,
             fields,
+            ..
         } => {
             if let Some((concrete_definition, concrete_class)) = instances.class(expression.type_id)
             {
@@ -5643,11 +5648,13 @@ pub enum HirExpressionKind {
     },
     Record {
         record: SymbolId,
+        allocation_site: pop_foundation::AllocationSiteId,
         fields: Vec<HirFieldValue>,
     },
     ClassConstruct {
         class: ClassId,
         definition: SymbolId,
+        allocation_site: pop_foundation::AllocationSiteId,
         fields: Vec<HirFieldValue>,
     },
     RecordUpdate {

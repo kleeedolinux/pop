@@ -201,10 +201,12 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             self.require_same_type(expected, definition.type_id(), span, span);
         }
         let typed_fields = self.check_class_fields(&definition, fields, span)?;
+        let allocation_site = self.fresh_allocation_site();
         self.diagnostics.is_empty().then_some(TypedExpression {
             kind: TypedExpressionKind::ClassConstruct {
                 class: definition.class(),
                 definition: definition.symbol(),
+                allocation_site,
                 fields: typed_fields,
             },
             type_id: definition.type_id(),
@@ -482,9 +484,11 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
             });
         if let Some(definition) = definition {
             let typed_fields = self.check_record_fields(&definition, fields, true, span)?;
+            let allocation_site = self.fresh_allocation_site();
             return Some(TypedExpression {
                 kind: TypedExpressionKind::Record {
                     record: definition.symbol(),
+                    allocation_site,
                     fields: typed_fields,
                 },
                 type_id: expected.type_id,

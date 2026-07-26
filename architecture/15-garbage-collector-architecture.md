@@ -143,6 +143,11 @@ The compiler should aggressively use:
 - immutable sharing;
 - region lifetime inference.
 
+ADR 0102 narrows native heap-operation fusion to two verified adjacent
+physical transition pairs while canonical MIR retains their separate typed
+operations. It does not permit a raw managed address, skipped barrier,
+reordered failure, crossed safe point, or workload-specific lowering.
+
 ADR 0085 makes this principle executable architecture. Optimized canonical MIR
 records `Elided`, `StaticSlot`, `ScopedRegion`, or managed storage plans plus
 verified non-lexical lifetime frontiers. A backend cannot invent a weaker escape
@@ -478,6 +483,21 @@ reference; payload words do not duplicate that fact with a per-slot runtime
 tag. A scalar whose bits equal a managed token remains a scalar and must never
 be traced. Segmented token directories derive the token from the segment and
 slot coordinate rather than storing the same token beside every entry.
+
+A monomorphic page owns one contiguous payload-word allocation. Objects retain
+checked page-range views rather than separate host payload allocations and
+share the page's precise layout descriptor. Token-indexed placement side
+metadata stores only the page and byte offset; object size, heap domain, and
+pointer layout are derived from the page descriptor. Relocation, pinning,
+publication, isolation, and growable-storage moves must bind the destination
+payload view and shared layout before committing the placement transition.
+
+ADR 0100 supplies that shared layout from one validated
+`AllocationSiteDescriptor` per managed-capable construction site. The
+descriptor retains both canonical ordered reference slots for tracing and a
+compact constant-time membership representation for checked access and
+barriers. Repeated allocations at one site reuse the validated descriptor; they
+do not rebuild, sort, or clone the object map.
 
 This improves:
 
@@ -1584,12 +1604,21 @@ A trace should correlate:
 - FFI transitions;
 - application tasks.
 
+ADR 0103's production implementation records exact active-stack watermark
+installation and processed `RootSlot` counts at each managed epoch
+acknowledgement. ABI 2 root cells form the complete backend-private active-root
+region for that poll; ready and suspended task frames remain separately
+retained precise containers.
+
 ---
 
 # 24. Performance Gates
 
 Initial production gates should include:
 
+- every native heap change passes ADR 0099's atomic paired 50-sample
+  `allocationChurn` and `objectArray` checksum, median, nearest-rank P99, and
+  peak-RSS regression budgets on one compatible declared host profile;
 - local allocation fast path is a pointer bump with no global lock;
 - stack-allocated and scalar-replaced objects perform no GC allocation;
 - proven non-escaping scalar arrays and aggregates consume the ADR 0085 static
@@ -1610,6 +1639,9 @@ Initial production gates should include:
 - no unbounded module-unload work in a pause.
 
 These are engineering gates, not language-level timing guarantees.
+The paired stable-stage gate is necessary regression evidence, not proof that
+the production collector is selectable or that an external-runtime comparison
+is portable.
 
 ---
 

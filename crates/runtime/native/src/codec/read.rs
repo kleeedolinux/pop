@@ -80,7 +80,7 @@ pub(super) fn read_event(
     drop(registered);
     // SAFETY: all output pointers were checked non-null and the caller contract
     // guarantees each exact pointee is writable for this call.
-    let published = publish_materialized_scalar(scalar, |scalar| unsafe {
+    let published = publish_materialized_scalar(&scalar, |scalar| unsafe {
         out_tag.write(tag);
         out_ordinal.write(ordinal);
         out_label.write(label);

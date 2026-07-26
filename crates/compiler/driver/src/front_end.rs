@@ -266,7 +266,7 @@ pub fn analyze_bubble(input: FrontEndBubbleInput) -> FrontEndResult {
         &mut functions,
         &database,
         &bootstrap,
-        &mut resolver,
+        &resolver,
         &mut diagnostics,
     );
     resolve_ffi_attributes(

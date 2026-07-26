@@ -22,11 +22,11 @@ impl BootstrapRuntime {
                 allocation.kind,
                 AllocationKind::Array(ArrayElementMap::Scalar)
             )
-            || !allocation.object_map.reference_slots().is_empty()
+            || allocation.object_map.has_reference_slots()
         {
             return None;
         }
-        Some(allocation.slots.iter().map(|slot| slot.raw()))
+        Some(allocation.slots.iter().map(SlotValue::raw))
     }
 
     #[must_use]
@@ -73,9 +73,7 @@ impl BootstrapRuntime {
                 .objects
                 .get_mut(&owner)
                 .ok_or_else(RuntimeFailure::runtime_invariant)?;
-            for slot in &mut allocation.slots {
-                *slot = SlotValue::scalar(value);
-            }
+            allocation.slots.fill(SlotValue::scalar(value));
         }
         Ok(())
     }
@@ -100,8 +98,7 @@ impl BootstrapRuntime {
             .objects
             .get(&owner)
             .filter(|allocation| allocation.object_map.is_reference_slot(slot))
-            .and_then(|allocation| allocation.slots.get(slot.raw() as usize))
-            .copied();
+            .and_then(|allocation| allocation.slots.get(slot.raw() as usize));
         let Some(previous) = previous.map(SlotValue::as_reference) else {
             return Err(RuntimeFailure::runtime_invariant());
         };
@@ -116,7 +113,12 @@ impl BootstrapRuntime {
             .objects
             .get_mut(&owner)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        allocation.slots[slot.raw() as usize] = SlotValue::reference(value);
+        if !allocation
+            .slots
+            .set(slot.raw() as usize, SlotValue::reference(value))
+        {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
         Ok(())
     }
 
@@ -139,10 +141,12 @@ impl BootstrapRuntime {
         if allocation.object_map.is_reference_slot(slot) {
             return Err(RuntimeFailure::runtime_invariant());
         }
-        let Some(current) = allocation.slots.get_mut(slot.raw() as usize) else {
+        if !allocation
+            .slots
+            .set(slot.raw() as usize, SlotValue::scalar(value))
+        {
             return Err(RuntimeFailure::runtime_invariant());
-        };
-        *current = SlotValue::scalar(value);
+        }
         Ok(())
     }
 
@@ -258,7 +262,6 @@ impl BootstrapRuntime {
         allocation
             .slots
             .get(slot.raw() as usize)
-            .copied()
             .map(SlotValue::raw)
             .ok_or_else(RuntimeFailure::runtime_invariant)
     }

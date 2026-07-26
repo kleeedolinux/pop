@@ -49,8 +49,27 @@ impl MutatorExecutionState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ActiveStackWatermark {
+    safe_point: SafePointId,
+    processed_root_slots: usize,
+}
+
+impl ActiveStackWatermark {
+    #[must_use]
+    pub const fn safe_point(self) -> SafePointId {
+        self.safe_point
+    }
+
+    #[must_use]
+    pub const fn processed_root_slots(self) -> usize {
+        self.processed_root_slots
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MutatorPublication {
     safe_point: SafePointId,
+    stack_watermark: ActiveStackWatermark,
     root_slots: usize,
     managed_roots: usize,
     tlab_top_bytes: usize,
@@ -68,6 +87,10 @@ impl MutatorPublication {
     ) -> Self {
         Self {
             safe_point: roots.stack_map().safe_point(),
+            stack_watermark: ActiveStackWatermark {
+                safe_point: roots.stack_map().safe_point(),
+                processed_root_slots: roots.stack_map().root_slots().len(),
+            },
             root_slots: roots.stack_map().root_slots().len(),
             managed_roots: roots.managed_references().count(),
             tlab_top_bytes,
@@ -84,6 +107,11 @@ impl MutatorPublication {
     #[must_use]
     pub const fn root_slots(self) -> usize {
         self.root_slots
+    }
+
+    #[must_use]
+    pub const fn stack_watermark(self) -> ActiveStackWatermark {
+        self.stack_watermark
     }
 
     #[must_use]
@@ -201,6 +229,8 @@ pub struct EpochCoordinatorTelemetry {
     pub(super) epochs_requested: u64,
     pub(super) epochs_completed: u64,
     pub(super) acknowledgements: u64,
+    pub(super) stack_watermarks_installed: u64,
+    pub(super) stack_watermark_slots_processed: u64,
     pub(super) automatic_acknowledgements: u64,
     pub(super) maximum_pending_acknowledgements: usize,
     pub(super) stale_epoch_polls: u64,
@@ -225,6 +255,8 @@ impl EpochCoordinatorTelemetry {
         epochs_requested: u64,
         epochs_completed: u64,
         acknowledgements: u64,
+        stack_watermarks_installed: u64,
+        stack_watermark_slots_processed: u64,
         automatic_acknowledgements: u64,
         maximum_pending_acknowledgements: usize,
         stale_epoch_polls: u64,

@@ -14,17 +14,20 @@ mod memory;
 mod ownership;
 mod parallel;
 mod pinning;
+mod pretenuring;
 mod stable;
 mod task_roots;
 mod workers;
 
 pub use allocation::{
     AllocationInfrastructureConfig, AllocationInfrastructureError, AllocationMetrics,
-    AllocationPlacement, HeapDomain, PageDescriptor, PageId, RegionId, RegionState,
-    RegionTelemetry,
+    AllocationPlacement, DirectPageAccess, DirectReferenceStoreAccess, DirectReferenceValidation,
+    HeapDomain, PageDescriptor, PageId, PendingMatureObject, RegionId, RegionState,
+    RegionTelemetry, ReservedMatureLease, ReservedMatureObject,
 };
+pub(crate) use allocation::{ReservedMatureIdentity, ReservedMaturePublication};
 pub use coordination::{
-    CollectorEpoch, CollectorPhase, EpochCoordinator, EpochCoordinatorConfig,
+    ActiveStackWatermark, CollectorEpoch, CollectorPhase, EpochCoordinator, EpochCoordinatorConfig,
     EpochCoordinatorConfigError, EpochCoordinatorError, EpochCoordinatorTelemetry, EpochProgress,
     MajorCollectionHandshakeError, MutatorExecutionState, MutatorId, MutatorPublication,
 };
@@ -44,6 +47,7 @@ pub use parallel::{
     ParallelSchedulerLocalTelemetry, SchedulerLocalContext,
 };
 pub use pinning::{PinningConfig, PinningTelemetry};
+pub use pretenuring::AdaptivePretenuringConfig;
 pub use stable::StableGenerationalRuntime;
 pub use task_roots::{
     TaskFrameRootConfig, TaskFrameRootConfigError, TaskFrameRootError, TaskFrameRootTelemetry,

@@ -400,11 +400,11 @@ fn reference_type_contains_view(reference: &ReferenceType) -> bool {
     }
 }
 
-fn reference_nominal_exists<'reference, T>(
+fn reference_nominal_exists<T>(
     nominal: &ReferenceNominalType,
     type_parameter_count: u16,
     owner: pop_foundation::BubbleId,
-    declarations: &BTreeMap<SymbolIdentity, &'reference T>,
+    declarations: &BTreeMap<SymbolIdentity, &T>,
 ) -> bool {
     (nominal.definition().bubble() != owner || declarations.contains_key(&nominal.definition()))
         && nominal.arguments().iter().all(|argument| {

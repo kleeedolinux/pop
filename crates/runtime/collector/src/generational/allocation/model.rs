@@ -1,8 +1,11 @@
 //! Public typed page, placement, configuration, and metric vocabulary.
 
-use pop_runtime_interface::{ObjectSlot, RuntimeTypeId};
+use std::sync::Arc;
+
+use pop_runtime_interface::{ObjectMap, ObjectSlot, RuntimeTypeId};
 
 use crate::SchedulerId;
+use crate::heap::PageWords;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[allow(clippy::struct_field_names)]
@@ -130,16 +133,16 @@ impl AllocationPlacement {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct PageDescriptor {
     pub(super) id: PageId,
     pub(super) region: RegionId,
     pub(super) domain: HeapDomain,
     pub(super) scheduler: Option<SchedulerId>,
     pub(super) type_id: RuntimeTypeId,
-    pub(super) slot_count: u32,
-    pub(super) reference_slots: Vec<ObjectSlot>,
+    pub(super) object_map: Arc<ObjectMap>,
     pub(super) capacity_bytes: usize,
+    pub(super) payload: PageWords,
 }
 
 impl PageDescriptor {
@@ -169,23 +172,32 @@ impl PageDescriptor {
     }
 
     #[must_use]
-    pub const fn slot_count(&self) -> u32 {
-        self.slot_count
+    pub fn slot_count(&self) -> u32 {
+        self.object_map.slot_count()
     }
 
     #[must_use]
     pub fn reference_slots(&self) -> &[ObjectSlot] {
-        &self.reference_slots
+        self.object_map.reference_slots()
     }
 
     #[must_use]
     pub fn pointer_free(&self) -> bool {
-        self.reference_slots.is_empty()
+        !self.object_map.has_reference_slots()
     }
 
     #[must_use]
     pub const fn capacity_bytes(&self) -> usize {
         self.capacity_bytes
+    }
+
+    #[must_use]
+    pub fn payload_word_capacity(&self) -> usize {
+        self.payload.len()
+    }
+
+    pub(crate) fn shares_object_map(&self, object_map: &Arc<ObjectMap>) -> bool {
+        Arc::ptr_eq(&self.object_map, object_map)
     }
 }
 

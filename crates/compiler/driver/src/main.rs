@@ -2547,6 +2547,7 @@ fn lower_toolchain_standard() -> Option<(ResolvedPackageLibrary, LoweredPackageB
     Some((library, lowered))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_native_bubble(
     bubble: BubbleId,
     modules: &[(PathBuf, PathBuf)],

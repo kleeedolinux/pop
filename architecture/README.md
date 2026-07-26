@@ -185,6 +185,27 @@ transplanted into a Luau-shaped file.
   values. Exact structured callable summaries permit direct non-retaining calls
   and parameter-alias results; storage, capture, suspension, ownership, FFI,
   and missing-metadata escapes fail statically under ADR 0097.
+- Managed-capable construction retains one typed `AllocationSiteId`. ADR 0100
+  lets native backends emit one immutable private layout descriptor per site;
+  the runtime validates it once and monomorphic pages share it across
+  allocation, access, barriers, and tracing without reflection or names.
+- ABI 1 stable-token allocation uses ADR 0101 scheduler/mutator-bound TLAB
+  leases. The common fixed-layout path initializes complete private payloads
+  and appends local publication records without a global lock or atomic
+  operation; refill, flush, safe points, ownership transitions, foreign entry,
+  migration, detach, and shutdown remain explicit checked boundaries.
+- ADR 0102 permits native ABI 1.21 to fuse only verified adjacent initialized-
+  object/managed-array-store and checked-array-read/static-field-read pairs.
+  Canonical MIR remains separate and backend-neutral; intervening effects,
+  extra uses, missing type proof, or control flow retain ordinary operations.
+- ADR 0103 makes the mutator-overlapped generational collector explicitly
+  selectable. The default native archive remains stable ABI 1; the separately
+  built production archive reports only ABI 2, uses writable roots and moving
+  nursery allocation, and applies versioned worker results deterministically.
+- ADR 0104 advances stable ABI 1 to 1.22 for atomic self-recursive closure and
+  native-iteration construction. Homogeneous and strided `ObjectMap` formulas
+  retain constant-size metadata for arrays, tables, and closed runtime layout
+  families without creating a dynamic layout escape.
 - Deterministic FFI generation selects one exact target-owned manifest plan,
   verifies one hashed canonical declarative `.popc` ABI-and-policy descriptor,
   and publishes only validated reviewable source, closed shim output, and

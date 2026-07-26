@@ -274,12 +274,12 @@ impl<'a> EventEmitter<'a> {
         label: Option<&str>,
         auxiliary: &str,
     ) -> Result<ReadEvent, LlvmLoweringError> {
-        let event = self.read_actual()?;
+        let event = self.read_actual();
         let _ = self.validate_event(&event, tag, ordinal, label, auxiliary)?;
         Ok(event)
     }
 
-    fn read_actual(&mut self) -> Result<ReadEvent, LlvmLoweringError> {
+    fn read_actual(&mut self) -> ReadEvent {
         let index = self.next;
         self.next += 1;
         let [
@@ -333,14 +333,14 @@ impl<'a> EventEmitter<'a> {
             format!("  {auxiliary} = load i64, ptr {auxiliary_output}"),
             format!("  {scalar} = load i64, ptr {scalar_output}"),
         ]);
-        Ok(ReadEvent {
+        ReadEvent {
             tag,
             ordinal,
             label,
             label_length,
             auxiliary,
             scalar,
-        })
+        }
     }
 
     fn validate_event(
@@ -512,7 +512,13 @@ fn lower_encode(
         types,
         field_layout,
     )?;
-    finish_codec_result(emitter, instruction, success, failure, None)
+    Ok(finish_codec_result(
+        emitter,
+        instruction,
+        success,
+        failure,
+        None,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1038,7 +1044,13 @@ fn lower_decode(
     let prefix = format!("v{}_codec_decode", instruction.result().raw());
     let mut emitter = EventEmitter::new(prefix.clone(), reader, string_literals, false);
     let decoded = decode_adapter(&mut emitter, adapter, adapters, types, field_layout, 0)?;
-    finish_codec_result(emitter, instruction, success, failure, Some(&decoded))
+    Ok(finish_codec_result(
+        emitter,
+        instruction,
+        success,
+        failure,
+        Some(&decoded),
+    ))
 }
 
 struct DecodedValue {
@@ -1139,7 +1151,7 @@ fn decode_enum(
     emitter: &mut EventEmitter<'_>,
     adapter: &MirGeneratedCodecAdapter,
 ) -> Result<DecodedValue, LlvmLoweringError> {
-    let event = emitter.read_actual()?;
+    let event = emitter.read_actual();
     let id = emitter.next;
     emitter.next += 1;
     let invalid = format!("{}_enum_{id}_invalid", emitter.prefix);
@@ -1215,7 +1227,7 @@ fn decode_tagged_union(
     field_layout: &BTreeMap<FieldId, u32>,
     depth: u8,
 ) -> Result<DecodedValue, LlvmLoweringError> {
-    let event = emitter.read_actual()?;
+    let event = emitter.read_actual();
     let id = emitter.next;
     emitter.next += 1;
     let invalid = format!("{}_union_{id}_invalid", emitter.prefix);
@@ -1291,7 +1303,7 @@ fn decode_tagged_union(
             emitter.store_field(&current, ordinal + 2, &payload.slot);
             emitter.release_root_if_live(&payload.root);
         }
-        let union_end = emitter.read_actual()?;
+        let union_end = emitter.read_actual();
         let _ = emitter.validate_event(&union_end, CodecEventTag::UnionEnd, "0", None, "0")?;
         let predecessor = format!("{}_union_{id}_ready_{}", emitter.prefix, member.ordinal());
         let current = emitter.resolve_root(&root);
@@ -1425,7 +1437,7 @@ fn decode_optional(
     field_layout: &BTreeMap<FieldId, u32>,
     depth: u8,
 ) -> Result<DecodedValue, LlvmLoweringError> {
-    let event = emitter.read_actual()?;
+    let event = emitter.read_actual();
     let tag_absent = format!("%{}_optional_absent_{}", emitter.prefix, emitter.next);
     let tag_present = format!("%{}_optional_present_{}", emitter.prefix, emitter.next);
     emitter.lines.extend([
@@ -1525,7 +1537,7 @@ fn decode_sequence(
     field_layout: &BTreeMap<FieldId, u32>,
     depth: u8,
 ) -> Result<DecodedValue, LlvmLoweringError> {
-    let event = emitter.read_actual()?;
+    let event = emitter.read_actual();
     emitter.validate_event_metadata(&event, CodecEventTag::SequenceStart, "0", None)?;
     let count = event.auxiliary;
     let within_limit = format!("%{}_sequence_count_valid_{}", emitter.prefix, emitter.next);
@@ -1739,7 +1751,7 @@ fn finish_codec_result(
     success: u32,
     failure: u32,
     decoded: Option<&DecodedValue>,
-) -> Result<String, LlvmLoweringError> {
+) -> String {
     let prefix = emitter.prefix.clone();
     let success_label = format!("{prefix}_success");
     let success_initialize = format!("{prefix}_success_result_initialize");
@@ -1915,5 +1927,5 @@ fn finish_codec_result(
             "{final_result} = phi i64 [ {success_result}, %{success_ready} ], [ {failure_result}, %{failure_ready} ], [ {capability_result}, %{capability_failure} ]"
         ),
     ]);
-    Ok(emitter.lines.join("\n"))
+    emitter.lines.join("\n")
 }

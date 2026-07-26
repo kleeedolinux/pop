@@ -5,7 +5,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         build-essential ca-certificates clang-22 curl golang-go libpolly-22-dev \
-        llvm-22-dev nodejs python3 ruby-full rustc cargo tar unzip xz-utils \
+        llvm-22-dev nodejs python3 ruby-full rustc cargo tar time unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 ENV LLVM_SYS_221_PREFIX=/usr/lib/llvm-22

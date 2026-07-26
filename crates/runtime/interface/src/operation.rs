@@ -2,6 +2,7 @@
 pub enum RuntimeOperation {
     AllocateObject,
     AllocateObjectInitialized,
+    AllocateObjectInitializedAtSite,
     AllocateArray,
     AllocateArrayFilled,
     AllocateTable,

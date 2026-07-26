@@ -1,7 +1,7 @@
 //! Native ABI 1.9 storage for the distinct growable `List<T>` abstraction.
 
 use pop_runtime_interface::{
-    AllocationClass, ArrayElementMap, ManagedReference, ObjectSlot, RuntimeAdapter, RuntimeTypeId,
+    ArrayElementMap, ManagedReference, ObjectSlot, RuntimeAdapter, RuntimeTypeId,
     TableAllocationRequest,
 };
 
@@ -20,7 +20,7 @@ pub extern "C" fn pop_rt_list_create(capacity: u64, managed_elements: u8) -> u64
     };
     let Ok(request) = TableAllocationRequest::new(
         RuntimeTypeId::new(0),
-        AllocationClass::Mature,
+        crate::allocation::native_default_allocation_class(),
         capacity,
         ArrayElementMap::Scalar,
         element_map,

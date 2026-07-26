@@ -428,6 +428,16 @@ fn pull_request_tests_do_not_execute_harness_free_benchmarks() {
         !workflow.contains("run: cargo test --workspace --all-targets"),
         "Cargo's all-targets test mode executes harness-free benchmark binaries"
     );
+    assert!(
+        workflow.contains("run: ruby benchmark/tests/benchmark_test.rb"),
+        "PR CI must execute the deterministic ADR 0099 heap-gate contract tests"
+    );
+
+    let template = read_required(repository_root().join(".github/PULL_REQUEST_TEMPLATE.md"));
+    assert!(
+        template.contains("ADR 0099 paired 50-sample native heap gate"),
+        "heap changes must identify their paired native regression evidence"
+    );
 }
 
 fn quoted_values_in_array(manifest: &str, key: &str) -> BTreeSet<String> {
@@ -745,6 +755,95 @@ fn runtime_crates_enforce_adr_0038_ownership() {
     assert_runtime_benchmark_contract(&runtime);
     assert_runtime_consumer_dependencies(&root);
     assert_runtime_documentation(&runtime);
+}
+
+#[test]
+fn native_heap_regression_gate_follows_adr_0099() {
+    let root = repository_root();
+    let adr = read_required(
+        root.join("architecture/decisions/0099-paired-native-heap-regression-gate.md"),
+    );
+    assert!(adr.contains("- Status: accepted"));
+
+    let runner = read_required(root.join("benchmark/bin/benchmark"));
+    for required in [
+        "module HeapGate",
+        "REQUIRED_WORKLOADS = %w[allocationChurn objectArray]",
+        "REQUIRED_SAMPLES = 50",
+        "BUDGET_NUMERATOR = 105",
+        "BUDGET_DENOMINATOR = 100",
+        "\"samplesNanoseconds\"",
+        "\"samplePeakRssKiB\"",
+        "\"p99Nanoseconds\"",
+        "\"workloadSourceSha256\"",
+        "\"expectedChecksumSha256\"",
+        "\"checksumValidated\"",
+        "validate_output(output, workload)",
+        "when \"heap-gate\"",
+    ] {
+        assert!(
+            runner.contains(required),
+            "ADR 0099 heap gate must preserve `{required}`"
+        );
+    }
+
+    let tests = read_required(root.join("benchmark/tests/benchmark_test.rb"));
+    for required in [
+        "an exact 5% heap regression must pass",
+        "a heap regression above 5% must fail",
+        "the heap gate must report all independent evidence failures",
+        "a timed checksum mismatch was accepted",
+    ] {
+        assert!(
+            tests.contains(required),
+            "ADR 0099 benchmark conformance must preserve `{required}`"
+        );
+    }
+
+    let garbage_collector =
+        read_required(root.join("architecture/15-garbage-collector-architecture.md"));
+    assert!(garbage_collector.contains("ADR 0099"));
+    let benchmark_documentation = read_required(root.join("benchmark/README.md"));
+    assert!(benchmark_documentation.contains("heap-gate"));
+}
+
+#[test]
+fn static_allocation_sites_follow_adr_0100() {
+    let root = repository_root();
+    let adr = read_required(
+        root.join("architecture/decisions/0100-static-allocation-site-descriptors.md"),
+    );
+    assert!(adr.contains("- Status: accepted"));
+
+    let plri = read_required(root.join("crates/runtime/interface/src/allocation.rs"));
+    let native_abi = read_required(root.join("crates/runtime/native-abi/src/version.rs"));
+    let native_symbols = read_required(root.join("crates/runtime/native-abi/src/symbol.rs"));
+    let native = read_required(root.join("crates/runtime/native/src/allocation.rs"));
+    let mir = read_required(root.join("crates/compiler/mir/src/ir.rs"));
+    let llvm =
+        read_required(root.join("crates/compiler/backends/llvm/src/instruction_lowering.rs"));
+    for (source, required) in [
+        (&plri, "pub struct AllocationSiteDescriptor"),
+        (&native_abi, "NativeAbiVersion::new(1, 22)"),
+        (&native_abi, "pub struct AllocationSiteDescriptorAbi"),
+        (
+            &native_symbols,
+            "ALLOCATE_INITIALIZED_SELF_REFERENTIAL_OBJECT_AT_SITE_SYMBOL",
+        ),
+        (&native_symbols, "ITERATION_MAKE_SYMBOL"),
+        (&native, "pop_rt_allocate_initialized_object_at_site"),
+        (&mir, "allocation_site: AllocationSiteId"),
+        (&llvm, "AllocateObjectInitializedAtSite"),
+    ] {
+        assert!(
+            source.contains(required),
+            "ADR 0100 implementation must preserve `{required}`"
+        );
+    }
+    assert!(
+        !llvm.contains("_object_map = alloca"),
+        "ADR 0100 forbids per-allocation LLVM pointer-map construction"
+    );
 }
 
 fn assert_plri_boundary(runtime: &Path) {

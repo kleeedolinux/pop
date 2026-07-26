@@ -1,6 +1,7 @@
 //! Precise reachability, allocation capacity, and collection work.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use pop_runtime_interface::{
     AllocationClass, CollectionStatistics, ManagedReference, ObjectMap, PanicPayload,
@@ -69,7 +70,7 @@ impl BootstrapRuntime {
         let requested_slots = usize::try_from(object_map.slot_count())
             .map_err(|_| Self::out_of_memory(1, usize::MAX))?;
         self.ensure_capacity(requested_slots)?;
-        if !object_map.reference_slots().is_empty()
+        if object_map.has_reference_slots()
             && let Some(value) = initial_value.filter(|value| *value != 0)
         {
             self.validate_reference(ManagedReference::new(value))?;
@@ -90,9 +91,10 @@ impl BootstrapRuntime {
             reference,
             Allocation {
                 kind,
+                site: None,
                 type_id,
                 class: allocation_class,
-                object_map,
+                object_map: Arc::new(object_map),
                 slots: slots.into(),
                 immutable_bytes: None,
             },
@@ -139,11 +141,10 @@ impl BootstrapRuntime {
                 .objects
                 .get(&reference)
                 .ok_or_else(RuntimeFailure::runtime_invariant)?;
-            for slot in allocation.object_map.reference_slots() {
+            for slot in allocation.object_map.iter_reference_slots() {
                 let value = allocation
                     .slots
                     .get(slot.raw() as usize)
-                    .copied()
                     .ok_or_else(RuntimeFailure::runtime_invariant)?;
                 if let Some(child) = value.as_reference() {
                     pending.push(child);

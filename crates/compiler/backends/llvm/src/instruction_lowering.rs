@@ -146,31 +146,43 @@ pub(crate) fn lower_instruction(
             ..
         } => lower_ffi_pointer_require(&result, *pointer, *success, *failure),
         MirInstructionKind::ResultMake {
-            case, arguments, ..
+            case,
+            allocation_site,
+            arguments,
+            ..
         } => lower_union_make(
             &result,
             pop_foundation::UnionCaseId::from_raw(case.raw()),
             arguments,
             value_types,
             types,
+            &allocation_site_symbol(bubble, owner, *allocation_site),
         )?,
         MirInstructionKind::IterationMake {
-            case, arguments, ..
+            case,
+            allocation_site,
+            arguments,
+            ..
         } => lower_union_make(
             &result,
             pop_foundation::UnionCaseId::from_raw(case.raw()),
             arguments,
             value_types,
             types,
+            &allocation_site_symbol(bubble, owner, *allocation_site),
         )?,
         MirInstructionKind::ErrorMake {
-            case, arguments, ..
+            case,
+            allocation_site,
+            arguments,
+            ..
         } => lower_union_make(
             &result,
             pop_foundation::UnionCaseId::from_raw(case.raw()),
             arguments,
             value_types,
             types,
+            &allocation_site_symbol(bubble, owner, *allocation_site),
         )?,
         MirInstructionKind::ResultIsOk { result: value, .. } => format!(
             "{result}_tag = call i64 @{}(i64 %v{}, i64 1)\n{result} = icmp eq i64 {result}_tag, 0",
@@ -620,12 +632,21 @@ pub(crate) fn lower_instruction(
             native_runtime_symbol(RuntimeOperation::SatbWriteBarrier),
             owner.raw()
         ),
-        MirInstructionKind::CaptureCellAllocate { initial, .. } => {
-            lower_capture_cell_allocate(&result, *initial, value_types, types)?
-        }
+        MirInstructionKind::CaptureCellAllocate {
+            allocation_site,
+            initial,
+            ..
+        } => lower_capture_cell_allocate(
+            &result,
+            *initial,
+            value_types,
+            types,
+            &allocation_site_symbol(bubble, owner, *allocation_site),
+        )?,
         MirInstructionKind::ClosureEnvironmentAllocate {
             owner,
             function,
+            allocation_site,
             captures,
             ..
         } => lower_closure_environment_allocate(
@@ -635,6 +656,7 @@ pub(crate) fn lower_instruction(
             captures,
             value_types,
             types,
+            &allocation_site_symbol(bubble, *owner, *allocation_site),
         )?,
         MirInstructionKind::ArrayMake {
             elements,
@@ -690,7 +712,11 @@ pub(crate) fn lower_instruction(
             value_types,
             types,
         )?,
-        MirInstructionKind::RecordMake { fields, .. } => {
+        MirInstructionKind::RecordMake {
+            allocation_site,
+            fields,
+            ..
+        } => {
             let slot_count = u32::try_from(fields.len())
                 .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
             lower_object_make(
@@ -700,10 +726,12 @@ pub(crate) fn lower_instruction(
                 value_types,
                 types,
                 field_layout,
+                &allocation_site_symbol(bubble, owner, *allocation_site),
             )?
         }
         MirInstructionKind::ClassMake {
             class,
+            allocation_site,
             fields,
             object_map,
         } => lower_class_make(
@@ -716,6 +744,7 @@ pub(crate) fn lower_instruction(
             value_types,
             types,
             field_layout,
+            &allocation_site_symbol(bubble, owner, *allocation_site),
         )?,
         MirInstructionKind::CallDirectMethod {
             method, arguments, ..
@@ -830,9 +859,17 @@ pub(crate) fn lower_instruction(
                 args.join(", ")
             )
         }
-        MirInstructionKind::TupleMake(elements) => {
-            lower_tuple_make(&result, elements, value_types, types)?
-        }
+        MirInstructionKind::TupleMake {
+            allocation_site,
+            elements,
+            ..
+        } => lower_tuple_make(
+            &result,
+            elements,
+            value_types,
+            types,
+            &allocation_site_symbol(bubble, owner, *allocation_site),
+        )?,
         MirInstructionKind::TupleGet { tuple, index } => lower_runtime_slot_load_from(
             instruction.result(),
             instruction.result_type(),
@@ -987,18 +1024,20 @@ pub(crate) fn lower_instruction(
         )?,
         MirInstructionKind::RecordUpdate {
             record,
+            allocation_site,
             base,
             fields,
+            ..
         } => lower_record_update(
             &result,
             *record,
             *base,
             fields,
             record_fields,
-            record_field_types,
             field_layout,
             value_types,
             types,
+            &allocation_site_symbol(bubble, owner, *allocation_site),
         )?,
         MirInstructionKind::FieldGet { base, field } => runtime_field_call(
             &result,
@@ -1023,8 +1062,18 @@ pub(crate) fn lower_instruction(
             field_layout,
         )?,
         MirInstructionKind::UnionMake {
-            case, arguments, ..
-        } => lower_union_make(&result, *case, arguments, value_types, types)?,
+            case,
+            allocation_site,
+            arguments,
+            ..
+        } => lower_union_make(
+            &result,
+            *case,
+            arguments,
+            value_types,
+            types,
+            &allocation_site_symbol(bubble, owner, *allocation_site),
+        )?,
         MirInstructionKind::IterationIsItem { iteration, .. } => format!(
             "{result}_tag = call i64 @{}(i64 %v{}, i64 1)\n{result} = icmp eq i64 {result}_tag, 0",
             native_runtime_symbol(RuntimeOperation::FieldGet),
@@ -1248,23 +1297,12 @@ pub(crate) fn lower_builtin_iteration_call(
         "unreachable".to_owned(),
         format!("{continuation}:"),
     ];
-    let reference_slots = if is_managed_type(item_type, types) {
-        vec![1]
-    } else {
-        Vec::new()
-    };
-    lines.extend(lower_mapped_allocation(result, 2, &reference_slots));
     lines.extend([
-        format!("{result}_iteration_tag_i8 = sub i8 {status}, 1"),
-        format!("{result}_iteration_tag = zext i8 {result}_iteration_tag_i8 to i64"),
         format!("{result}_iteration_payload = load i64, ptr {output}"),
         format!(
-            "call i8 @{}(i64 {result}, i64 1, i64 {result}_iteration_tag)",
-            native_runtime_symbol(RuntimeOperation::FieldSet)
-        ),
-        format!(
-            "call i8 @{}(i64 {result}, i64 2, i64 {result}_iteration_payload)",
-            native_runtime_symbol(RuntimeOperation::FieldSet)
+            "{result} = call i64 @{}(i8 {status}, i64 {result}_iteration_payload, i1 {})",
+            pop_runtime_native_abi::ITERATION_MAKE_SYMBOL,
+            is_managed_type(item_type, types)
         ),
     ]);
     Ok(lines.join("\n"))
@@ -2582,6 +2620,57 @@ pub(crate) fn lower_array_output_call(
     Ok(lines.join("\n"))
 }
 
+pub(crate) fn lower_adjacent_array_field_get(
+    array_get: &pop_mir::MirInstruction,
+    field_get: &pop_mir::MirInstruction,
+    array: ValueId,
+    index: ValueId,
+    field: FieldId,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+    field_layout: &BTreeMap<FieldId, u32>,
+) -> Result<String, LlvmLoweringError> {
+    let slot = *field_layout
+        .get(&field)
+        .ok_or(LlvmLoweringError::InvalidFieldLayout(field))?;
+    if llvm_value_type(values, array, types)? != "i64"
+        || llvm_value_type(values, index, types)? != "i64"
+    {
+        return Err(LlvmLoweringError::InvalidType(array_get.result_type()));
+    }
+    let get_result = format!("%v{}", array_get.result().raw());
+    let field_result = format!("%v{}", field_get.result().raw());
+    let output = format!("{get_result}_output");
+    let success = format!("{get_result}_success");
+    let expected = format!("{get_result}_success_expected");
+    let label = get_result.trim_start_matches('%');
+    let mut lines = vec![
+        format!(
+            "{success} = call i8 @{}(i64 %v{}, i64 %v{}, i64 {slot}, ptr {output})",
+            pop_runtime_native_abi::ARRAY_GET_OBJECT_FIELD_CHECKED_SYMBOL,
+            array.raw(),
+            index.raw(),
+        ),
+        format!("{success}_condition = icmp ne i8 {success}, 0"),
+        format!("{expected} = call i1 @llvm.expect.i1(i1 {success}_condition, i1 true)"),
+        format!("br i1 {expected}, label %{label}_load, label %{label}_trap"),
+        format!("{label}_trap:"),
+        format!(
+            "  call void @{}()",
+            native_runtime_symbol(RuntimeOperation::Trap)
+        ),
+        "  unreachable".to_owned(),
+        format!("{label}_load:"),
+    ];
+    lines.extend(lower_array_output_load(
+        &field_result,
+        field_get.result_type(),
+        &output,
+        types,
+    )?);
+    Ok(lines.join("\n"))
+}
+
 pub(crate) fn lower_optional_array_get(
     result: &str,
     array: ValueId,
@@ -2912,6 +3001,7 @@ pub(crate) fn lower_object_make(
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
     field_layout: &BTreeMap<FieldId, u32>,
+    descriptor: &str,
 ) -> Result<String, LlvmLoweringError> {
     lower_initialized_object(
         result,
@@ -2921,12 +3011,14 @@ pub(crate) fn lower_object_make(
         values,
         types,
         field_layout,
+        descriptor,
     )
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum ObjectInitializer<'a> {
     ConstantExpression(&'a str),
+    Rendered(String),
     Value(ValueId),
 }
 
@@ -2939,6 +3031,7 @@ fn lower_initialized_object(
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
     field_layout: &BTreeMap<FieldId, u32>,
+    descriptor: &str,
 ) -> Result<String, LlvmLoweringError> {
     let mut reference_slots = Vec::new();
     for (field, value) in fields {
@@ -2981,31 +3074,59 @@ fn lower_initialized_object(
         return Err(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)));
     }
 
-    let map = format!("{result}_object_map");
-    let map_pointer = if reference_slots.is_empty() {
-        "null".to_owned()
-    } else {
-        format!("{map}_pointer")
-    };
-    let mut lines = Vec::new();
-    if !reference_slots.is_empty() {
-        lines.push(format!("{map} = alloca [{} x i32]", reference_slots.len()));
-        for (index, slot) in reference_slots.iter().enumerate() {
-            let entry = format!("{map}_{index}");
-            lines.extend([
-                format!(
-                    "{entry} = getelementptr [{} x i32], ptr {map}, i64 0, i64 {index}",
-                    reference_slots.len()
-                ),
-                format!("store i32 {slot}, ptr {entry}"),
-            ]);
-        }
-        lines.push(format!(
-            "{map_pointer} = getelementptr [{} x i32], ptr {map}, i64 0, i64 0",
-            reference_slots.len()
-        ));
-    }
+    lower_initialized_values(
+        result,
+        initializers
+            .into_iter()
+            .map(|initializer| initializer.expect("complete initializers were validated"))
+            .collect(),
+        values,
+        types,
+        descriptor,
+    )
+}
 
+fn lower_initialized_values(
+    result: &str,
+    initializers: Vec<ObjectInitializer<'_>>,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+    descriptor: &str,
+) -> Result<String, LlvmLoweringError> {
+    lower_initialized_values_with_store(result, initializers, values, types, descriptor, None, None)
+}
+
+fn lower_initialized_self_referential_values(
+    result: &str,
+    initializers: Vec<ObjectInitializer<'_>>,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+    descriptor: &str,
+    self_slot_count: u32,
+) -> Result<String, LlvmLoweringError> {
+    lower_initialized_values_with_store(
+        result,
+        initializers,
+        values,
+        types,
+        descriptor,
+        None,
+        Some(self_slot_count),
+    )
+}
+
+fn lower_initialized_values_with_store(
+    result: &str,
+    initializers: Vec<ObjectInitializer<'_>>,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+    descriptor: &str,
+    store: Option<(ValueId, ValueId, ValueId)>,
+    self_slot_count: Option<u32>,
+) -> Result<String, LlvmLoweringError> {
+    let slot_count = u32::try_from(initializers.len())
+        .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let mut lines = Vec::new();
     let payload = format!("{result}_initial_values");
     let payload_pointer = if slot_count == 0 {
         "null".to_owned()
@@ -3019,8 +3140,9 @@ fn lower_initialized_object(
             lines.push(format!(
                 "{entry} = getelementptr [{slot_count} x i64], ptr {payload}, i64 0, i64 {index}"
             ));
-            let stored = match initializer.expect("complete initializers were validated") {
+            let stored = match initializer {
                 ObjectInitializer::ConstantExpression(value) => value.to_owned(),
+                ObjectInitializer::Rendered(value) => value,
                 ObjectInitializer::Value(value) => {
                     let type_id = *values
                         .get(&value)
@@ -3037,12 +3159,95 @@ fn lower_initialized_object(
             "{payload_pointer} = getelementptr [{slot_count} x i64], ptr {payload}, i64 0, i64 0"
         ));
     }
-    lines.push(format!(
-        "{result} = call i64 @{}(i64 {slot_count}, ptr {map_pointer}, i64 {}, ptr {payload_pointer}, i64 {slot_count})",
-        native_runtime_symbol(RuntimeOperation::AllocateObjectInitialized),
-        reference_slots.len()
-    ));
+    if let Some((array, index, store_result)) = store {
+        lines.push(format!(
+            "{result} = call i64 @{}(ptr @{descriptor}, ptr {payload_pointer}, i64 {slot_count}, i64 %v{}, i64 %v{})",
+            pop_runtime_native_abi::ALLOCATE_INITIALIZED_OBJECT_AT_SITE_AND_STORE_ARRAY_SYMBOL,
+            array.raw(),
+            index.raw(),
+        ));
+        let store_result = format!("%v{}", store_result.raw());
+        let label = store_result.trim_start_matches('%');
+        lines.extend([
+            format!("{store_result}_stored = icmp ne i64 {result}, 0"),
+            format!(
+                "{store_result}_expected = call i1 @llvm.expect.i1(i1 {store_result}_stored, i1 true)"
+            ),
+            format!(
+                "br i1 {store_result}_expected, label %{label}_continue, label %{label}_trap"
+            ),
+            format!("{label}_trap:"),
+            format!(
+                "  call void @{}()",
+                native_runtime_symbol(RuntimeOperation::Trap)
+            ),
+            "  unreachable".to_owned(),
+            format!("{label}_continue:"),
+            format!("  {store_result} = add i64 0, 0"),
+        ]);
+    } else if let Some(self_slot_count) = self_slot_count {
+        lines.push(format!(
+            "{result} = call i64 @{}(ptr @{descriptor}, ptr {payload_pointer}, i64 {slot_count}, ptr @{descriptor}_self_slots, i64 {self_slot_count})",
+            pop_runtime_native_abi::ALLOCATE_INITIALIZED_SELF_REFERENTIAL_OBJECT_AT_SITE_SYMBOL,
+        ));
+    } else {
+        lines.push(format!(
+            "{result} = call i64 @{}(ptr @{descriptor}, ptr {payload_pointer}, i64 {slot_count})",
+            native_runtime_symbol(RuntimeOperation::AllocateObjectInitializedAtSite),
+        ));
+    }
     Ok(lines.join("\n"))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lower_adjacent_class_array_store(
+    result: &str,
+    runtime_key: &str,
+    fields: &[(FieldId, ValueId)],
+    slot_count: u32,
+    values: &BTreeMap<ValueId, TypeId>,
+    types: &TypeArena,
+    field_layout: &BTreeMap<FieldId, u32>,
+    descriptor: &str,
+    array: ValueId,
+    index: ValueId,
+    store_result: ValueId,
+) -> Result<String, LlvmLoweringError> {
+    let slot_count_usize = usize::try_from(slot_count)
+        .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+    let mut initializers = vec![None; slot_count_usize];
+    let Some(class_slot) = initializers.first_mut() else {
+        return Err(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)));
+    };
+    *class_slot = Some(ObjectInitializer::ConstantExpression(runtime_key));
+    for (field, value) in fields {
+        let slot = field_layout
+            .get(field)
+            .ok_or(LlvmLoweringError::InvalidFieldLayout(*field))?;
+        let index = slot
+            .checked_sub(1)
+            .and_then(|slot| usize::try_from(slot).ok())
+            .ok_or(LlvmLoweringError::InvalidFieldLayout(*field))?;
+        let Some(initializer) = initializers.get_mut(index) else {
+            return Err(LlvmLoweringError::InvalidFieldLayout(*field));
+        };
+        *initializer = Some(ObjectInitializer::Value(*value));
+    }
+    if initializers.iter().any(Option::is_none) {
+        return Err(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)));
+    }
+    lower_initialized_values_with_store(
+        result,
+        initializers
+            .into_iter()
+            .map(|initializer| initializer.expect("complete initializers were validated"))
+            .collect(),
+        values,
+        types,
+        descriptor,
+        Some((array, index, store_result)),
+        None,
+    )
 }
 
 pub(crate) fn lower_mapped_allocation(
@@ -3097,7 +3302,6 @@ pub(crate) fn lower_gc_safe_point(
     let root_array = format!("{result}_roots");
     let mut lines = Vec::new();
     if !roots.is_empty() {
-        lines.push(format!("{root_array} = alloca [{} x i64]", roots.len()));
         for (index, root) in roots.iter().enumerate() {
             let entry = format!("{root_array}_{index}");
             lines.extend([
@@ -3207,38 +3411,19 @@ pub(crate) fn lower_tuple_make(
     elements: &[ValueId],
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
+    descriptor: &str,
 ) -> Result<String, LlvmLoweringError> {
-    let reference_slots = elements
-        .iter()
-        .enumerate()
-        .filter_map(|(index, value)| {
-            values
-                .get(value)
-                .copied()
-                .filter(|type_id| is_managed_type(*type_id, types))
-                .and_then(|_| u32::try_from(index).ok())
-        })
-        .collect::<Vec<_>>();
-    let mut lines = lower_mapped_allocation(
+    lower_initialized_values(
         result,
-        u32::try_from(elements.len())
-            .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?,
-        &reference_slots,
-    );
-    for (index, value) in elements.iter().enumerate() {
-        let type_id = *values
-            .get(value)
-            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
-        let (conversions, stored) =
-            lower_runtime_slot_store(*value, type_id, &llvm_type(type_id, types)?)?;
-        lines.extend(conversions);
-        lines.push(format!(
-            "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
-            native_runtime_symbol(RuntimeOperation::FieldSet),
-            index + 1
-        ));
-    }
-    Ok(lines.join("\n"))
+        elements
+            .iter()
+            .copied()
+            .map(ObjectInitializer::Value)
+            .collect(),
+        values,
+        types,
+        descriptor,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3248,46 +3433,25 @@ pub(crate) fn lower_record_update(
     base: ValueId,
     updates: &[(FieldId, ValueId)],
     record_fields: &BTreeMap<SymbolId, Vec<FieldId>>,
-    record_field_types: &BTreeMap<TypeId, Vec<TypeId>>,
     field_layout: &BTreeMap<FieldId, u32>,
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
+    descriptor: &str,
 ) -> Result<String, LlvmLoweringError> {
     let fields = record_fields
         .get(&record)
         .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
-    let base_type = *values
-        .get(&base)
-        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
-    let reference_slots = record_field_types
-        .get(&base_type)
-        .ok_or(LlvmLoweringError::InvalidType(base_type))?
-        .iter()
-        .enumerate()
-        .filter_map(|(index, type_id)| {
-            is_managed_type(*type_id, types)
-                .then(|| u32::try_from(index).ok())
-                .flatten()
-        })
-        .collect::<Vec<_>>();
-    let mut lines = lower_mapped_allocation(
-        result,
-        u32::try_from(fields.len()).map_err(|_| LlvmLoweringError::InvalidType(base_type))?,
-        &reference_slots,
-    );
+    if !values.contains_key(&base) {
+        return Err(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)));
+    }
+    let mut lines = Vec::new();
+    let mut initializers = Vec::with_capacity(fields.len());
     for field in fields {
         let slot = *field_layout
             .get(field)
             .ok_or(LlvmLoweringError::InvalidFieldLayout(*field))?;
-        let stored = if let Some((_, value)) = updates.iter().find(|(updated, _)| updated == field)
-        {
-            let type_id = *values
-                .get(value)
-                .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
-            let (conversions, stored) =
-                lower_runtime_slot_store(*value, type_id, &llvm_type(type_id, types)?)?;
-            lines.extend(conversions);
-            stored
+        if let Some((_, value)) = updates.iter().find(|(updated, _)| updated == field) {
+            initializers.push(ObjectInitializer::Value(*value));
         } else {
             let loaded = format!("{result}_field_{slot}");
             lines.push(format!(
@@ -3295,13 +3459,16 @@ pub(crate) fn lower_record_update(
                 native_runtime_symbol(RuntimeOperation::FieldGet),
                 base.raw()
             ));
-            loaded
-        };
-        lines.push(format!(
-            "call i8 @{}(i64 {result}, i64 {slot}, i64 {stored})",
-            native_runtime_symbol(RuntimeOperation::FieldSet)
-        ));
+            initializers.push(ObjectInitializer::Rendered(loaded));
+        }
     }
+    lines.push(lower_initialized_values(
+        result,
+        initializers,
+        values,
+        types,
+        descriptor,
+    )?);
     Ok(lines.join("\n"))
 }
 
@@ -3313,6 +3480,7 @@ pub(crate) fn lower_class_make(
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
     field_layout: &BTreeMap<FieldId, u32>,
+    descriptor: &str,
 ) -> Result<String, LlvmLoweringError> {
     lower_initialized_object(
         result,
@@ -3322,6 +3490,20 @@ pub(crate) fn lower_class_make(
         values,
         types,
         field_layout,
+        descriptor,
+    )
+}
+
+pub(crate) fn allocation_site_symbol(
+    bubble: BubbleId,
+    owner: SymbolId,
+    site: pop_foundation::AllocationSiteId,
+) -> String {
+    format!(
+        "pop_allocation_site_{}_{}_{}",
+        bubble.raw(),
+        owner.raw(),
+        site.raw()
     )
 }
 
@@ -3331,43 +3513,17 @@ pub(crate) fn lower_union_make(
     arguments: &[ValueId],
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
+    descriptor: &str,
 ) -> Result<String, LlvmLoweringError> {
-    let reference_slots = arguments
-        .iter()
-        .enumerate()
-        .filter_map(|(index, value)| {
-            values
-                .get(value)
-                .copied()
-                .filter(|type_id| is_managed_type(*type_id, types))
-                .and_then(|_| u32::try_from(index + 1).ok())
-        })
-        .collect::<Vec<_>>();
-    let mut lines = lower_mapped_allocation(
+    lower_initialized_values(
         result,
-        u32::try_from(arguments.len() + 1)
-            .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?,
-        &reference_slots,
-    );
-    lines.push(format!(
-        "call i8 @{}(i64 {result}, i64 1, i64 {})",
-        native_runtime_symbol(RuntimeOperation::FieldSet),
-        case.raw()
-    ));
-    for (index, value) in arguments.iter().enumerate() {
-        let type_id = *values
-            .get(value)
-            .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
-        let ty = llvm_type(type_id, types)?;
-        let (conversions, stored) = lower_runtime_slot_store(*value, type_id, &ty)?;
-        lines.extend(conversions);
-        lines.push(format!(
-            "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
-            native_runtime_symbol(RuntimeOperation::FieldSet),
-            index + 2
-        ));
-    }
-    Ok(lines.join("\n"))
+        std::iter::once(ObjectInitializer::Rendered(case.raw().to_string()))
+            .chain(arguments.iter().copied().map(ObjectInitializer::Value))
+            .collect(),
+        values,
+        types,
+        descriptor,
+    )
 }
 
 fn lower_ffi_pointer_require(
@@ -3419,23 +3575,15 @@ pub(crate) fn lower_capture_cell_allocate(
     initial: ValueId,
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
+    descriptor: &str,
 ) -> Result<String, LlvmLoweringError> {
-    let type_id = *values
-        .get(&initial)
-        .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
-    let (conversions, stored) =
-        lower_runtime_slot_store(initial, type_id, &llvm_type(type_id, types)?)?;
-    let reference_slots = is_managed_type(type_id, types)
-        .then_some(0)
-        .into_iter()
-        .collect::<Vec<_>>();
-    let mut lines = lower_mapped_allocation(result, 1, &reference_slots);
-    lines.extend(conversions);
-    lines.push(format!(
-        "call i8 @{}(i64 {result}, i64 1, i64 {stored})",
-        native_runtime_symbol(RuntimeOperation::FieldSet)
-    ));
-    Ok(lines.join("\n"))
+    lower_initialized_values(
+        result,
+        vec![ObjectInitializer::Value(initial)],
+        values,
+        types,
+        descriptor,
+    )
 }
 
 pub(crate) fn lower_closure_environment_allocate(
@@ -3445,45 +3593,42 @@ pub(crate) fn lower_closure_environment_allocate(
     captures: &[pop_mir::MirClosureCapture],
     values: &BTreeMap<ValueId, TypeId>,
     types: &TypeArena,
+    descriptor: &str,
 ) -> Result<String, LlvmLoweringError> {
-    let reference_slots = captures
-        .iter()
-        .filter_map(|capture| {
-            (capture.self_reference()
-                || capture.mode() == pop_mir::MirCaptureMode::Cell
-                || is_managed_type(capture.type_id(), types))
-            .then_some(capture.slot() + 1)
-        })
-        .collect::<Vec<_>>();
-    let mut lines = lower_mapped_allocation(
-        result,
-        u32::try_from(captures.len() + 1)
-            .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?,
-        &reference_slots,
-    );
-    lines.push(format!(
-        "call i8 @{}(i64 {result}, i64 1, i64 {})",
-        native_runtime_symbol(RuntimeOperation::FieldSet),
-        nested_function_tag(owner, function)
-    ));
-    for capture in captures {
-        let (conversions, stored) = if capture.self_reference() {
-            (Vec::new(), result.to_owned())
-        } else {
-            let value = capture.value();
-            let type_id = *values
-                .get(&value)
-                .ok_or(LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
-            lower_runtime_slot_store(value, type_id, &llvm_type(type_id, types)?)?
-        };
-        lines.extend(conversions);
-        lines.push(format!(
-            "call i8 @{}(i64 {result}, i64 {}, i64 {stored})",
-            native_runtime_symbol(RuntimeOperation::FieldSet),
-            capture.slot() + 2
-        ));
+    if captures.iter().any(|capture| capture.self_reference()) {
+        let self_slot_count = captures
+            .iter()
+            .filter(|capture| capture.self_reference())
+            .count();
+        let self_slot_count = u32::try_from(self_slot_count)
+            .map_err(|_| LlvmLoweringError::InvalidType(TypeId::from_raw(u32::MAX)))?;
+        let mut initializers = vec![ObjectInitializer::Rendered(
+            nested_function_tag(owner, function).to_string(),
+        )];
+        for capture in captures {
+            if capture.self_reference() {
+                initializers.push(ObjectInitializer::Rendered("0".to_owned()));
+            } else {
+                initializers.push(ObjectInitializer::Value(capture.value()));
+            }
+        }
+        return lower_initialized_self_referential_values(
+            result,
+            initializers,
+            values,
+            types,
+            descriptor,
+            self_slot_count,
+        );
     }
-    Ok(lines.join("\n"))
+
+    let mut initializers = vec![ObjectInitializer::Rendered(
+        nested_function_tag(owner, function).to_string(),
+    )];
+    for capture in captures {
+        initializers.push(ObjectInitializer::Value(capture.value()));
+    }
+    lower_initialized_values(result, initializers, values, types, descriptor)
 }
 
 pub(crate) fn lower_capture_store(

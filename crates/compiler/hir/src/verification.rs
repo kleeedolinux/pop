@@ -4731,7 +4731,7 @@ impl Verifier<'_> {
                 self.verify_expression(base, visible);
                 self.verify_field_get(*field, base, expression);
             }
-            HirExpressionKind::Record { record, fields } => {
+            HirExpressionKind::Record { record, fields, .. } => {
                 self.verify_fields(fields, visible);
                 self.verify_record(*record, fields, true, expression);
             }
@@ -4739,6 +4739,7 @@ impl Verifier<'_> {
                 class,
                 definition,
                 fields,
+                ..
             } => {
                 self.verify_fields(fields, visible);
                 self.verify_class(*class, *definition, fields, expression);

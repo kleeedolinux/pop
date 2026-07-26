@@ -18,8 +18,10 @@ fn sequence_callbacks_are_invoked_once_per_loop_item() {
         let marker = format!("public function {name}<");
         let function = source
             .split_once(&marker)
-            .map(|(_, remainder)| remainder)
-            .unwrap_or_else(|| panic!("missing Sequence.{name}"))
+            .map_or_else(
+                || panic!("missing Sequence.{name}"),
+                |(_, remainder)| remainder,
+            )
             .split_once("\npublic function ")
             .map_or_else(|| source, |(body, _)| body);
         assert_eq!(

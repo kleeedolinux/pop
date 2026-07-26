@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{ObjectMap, ObjectMapError, ObjectSlot, RuntimeTypeId};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -8,25 +10,66 @@ pub enum AllocationClass {
     Pinned,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ObjectAllocationRequest {
-    type_id: RuntimeTypeId,
-    allocation_class: AllocationClass,
-    object_map: ObjectMap,
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RuntimeAllocationSiteId {
+    bubble: u32,
+    owner: u32,
+    local: u32,
 }
 
-impl ObjectAllocationRequest {
+impl RuntimeAllocationSiteId {
     #[must_use]
-    pub const fn new(
+    pub const fn new(bubble: u32, owner: u32, local: u32) -> Self {
+        Self {
+            bubble,
+            owner,
+            local,
+        }
+    }
+
+    #[must_use]
+    pub const fn bubble(self) -> u32 {
+        self.bubble
+    }
+
+    #[must_use]
+    pub const fn owner(self) -> u32 {
+        self.owner
+    }
+
+    #[must_use]
+    pub const fn local(self) -> u32 {
+        self.local
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AllocationSiteDescriptor {
+    site: RuntimeAllocationSiteId,
+    type_id: RuntimeTypeId,
+    allocation_class: AllocationClass,
+    object_map: Arc<ObjectMap>,
+}
+
+impl AllocationSiteDescriptor {
+    #[must_use]
+    pub fn new(
+        site: RuntimeAllocationSiteId,
         type_id: RuntimeTypeId,
         allocation_class: AllocationClass,
         object_map: ObjectMap,
     ) -> Self {
         Self {
+            site,
             type_id,
             allocation_class,
-            object_map,
+            object_map: Arc::new(object_map),
         }
+    }
+
+    #[must_use]
+    pub const fn site(&self) -> RuntimeAllocationSiteId {
+        self.site
     }
 
     #[must_use]
@@ -40,8 +83,82 @@ impl ObjectAllocationRequest {
     }
 
     #[must_use]
-    pub const fn object_map(&self) -> &ObjectMap {
+    pub fn object_map(&self) -> &ObjectMap {
         &self.object_map
+    }
+
+    #[must_use]
+    pub fn shared_object_map(&self) -> Arc<ObjectMap> {
+        self.object_map.clone()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObjectAllocationRequest {
+    site: Option<RuntimeAllocationSiteId>,
+    type_id: RuntimeTypeId,
+    allocation_class: AllocationClass,
+    object_map: Arc<ObjectMap>,
+}
+
+impl ObjectAllocationRequest {
+    #[must_use]
+    pub fn new(
+        type_id: RuntimeTypeId,
+        allocation_class: AllocationClass,
+        object_map: ObjectMap,
+    ) -> Self {
+        Self {
+            site: None,
+            type_id,
+            allocation_class,
+            object_map: Arc::new(object_map),
+        }
+    }
+
+    #[must_use]
+    pub fn from_descriptor(descriptor: &AllocationSiteDescriptor) -> Self {
+        Self {
+            site: Some(descriptor.site),
+            type_id: descriptor.type_id,
+            allocation_class: descriptor.allocation_class,
+            object_map: descriptor.object_map.clone(),
+        }
+    }
+
+    #[must_use]
+    pub const fn allocation_site(&self) -> Option<RuntimeAllocationSiteId> {
+        self.site
+    }
+
+    #[must_use]
+    pub const fn type_id(&self) -> RuntimeTypeId {
+        self.type_id
+    }
+
+    #[must_use]
+    pub const fn allocation_class(&self) -> AllocationClass {
+        self.allocation_class
+    }
+
+    #[must_use]
+    pub fn object_map(&self) -> &ObjectMap {
+        &self.object_map
+    }
+
+    #[must_use]
+    pub fn shared_object_map(&self) -> Arc<ObjectMap> {
+        self.object_map.clone()
+    }
+
+    #[must_use]
+    pub fn with_allocation_class(&self, allocation_class: AllocationClass) -> Self {
+        Self {
+            site: self.site,
+            type_id: self.type_id,
+            allocation_class,
+            object_map: self.object_map.clone(),
+        }
     }
 }
 
@@ -80,8 +197,8 @@ impl TableAllocationRequest {
     ///
     /// # Errors
     ///
-    /// Returns an error when twice the entry capacity cannot be represented by
-    /// the portable logical-slot index.
+    /// Returns an error when twice the entry capacity or its precise
+    /// interleaved reference layout cannot be represented.
     pub fn new(
         type_id: RuntimeTypeId,
         allocation_class: AllocationClass,
@@ -92,26 +209,32 @@ impl TableAllocationRequest {
         let slot_count = entry_count
             .checked_mul(2)
             .ok_or(TableAllocationError::EntryCapacityOverflow(entry_count))?;
-        let reference_capacity = usize::try_from(entry_count)
-            .unwrap_or(usize::MAX)
-            .saturating_mul(usize::from(key_map == ArrayElementMap::ManagedReference))
-            .saturating_add(
-                usize::try_from(entry_count)
-                    .unwrap_or(usize::MAX)
-                    .saturating_mul(usize::from(value_map == ArrayElementMap::ManagedReference)),
-            );
-        let mut reference_slots = Vec::with_capacity(reference_capacity);
-        for entry in 0..entry_count {
-            let key_slot = entry * 2;
-            if key_map == ArrayElementMap::ManagedReference {
-                reference_slots.push(ObjectSlot::new(key_slot));
+        let object_map = if entry_count == 0 {
+            ObjectMap::scalar(slot_count)
+        } else {
+            match (key_map, value_map) {
+                (ArrayElementMap::Scalar, ArrayElementMap::Scalar) => ObjectMap::scalar(slot_count),
+                (ArrayElementMap::ManagedReference, ArrayElementMap::ManagedReference) => {
+                    ObjectMap::homogeneous_references(slot_count)
+                }
+                (ArrayElementMap::ManagedReference, ArrayElementMap::Scalar) => {
+                    ObjectMap::strided_references(slot_count, 0, 2).ok_or(
+                        TableAllocationError::InvalidObjectMap(ObjectMapError::SlotOutOfBounds {
+                            slot: ObjectSlot::new(0),
+                            slot_count,
+                        }),
+                    )?
+                }
+                (ArrayElementMap::Scalar, ArrayElementMap::ManagedReference) => {
+                    ObjectMap::strided_references(slot_count, 1, 2).ok_or(
+                        TableAllocationError::InvalidObjectMap(ObjectMapError::SlotOutOfBounds {
+                            slot: ObjectSlot::new(1),
+                            slot_count,
+                        }),
+                    )?
+                }
             }
-            if value_map == ArrayElementMap::ManagedReference {
-                reference_slots.push(ObjectSlot::new(key_slot + 1));
-            }
-        }
-        let object_map = ObjectMap::new(slot_count, reference_slots)
-            .map_err(TableAllocationError::InvalidObjectMap)?;
+        };
         Ok(Self {
             type_id,
             allocation_class,

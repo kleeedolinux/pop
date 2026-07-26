@@ -143,7 +143,7 @@ impl RuntimeAdapter for BootstrapRuntime {
             return Err(RuntimeFailure::runtime_invariant());
         }
         let current = allocation.slots.get(barrier.slot().raw() as usize);
-        if current.copied().map(SlotValue::as_reference) != Some(barrier.previous()) {
+        if current.map(SlotValue::as_reference) != Some(barrier.previous()) {
             return Err(RuntimeFailure::runtime_invariant());
         }
         Ok(())

@@ -146,7 +146,6 @@ fn declared_interface_effects(
             for method in &interface.methods {
                 interfaces.insert((interface.interface, method.method), method.effects);
             }
-            continue;
         }
     }
     (interfaces, builtins)

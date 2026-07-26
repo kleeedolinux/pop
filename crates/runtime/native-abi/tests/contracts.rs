@@ -2,14 +2,17 @@ use std::collections::BTreeSet;
 
 use pop_runtime_interface::RuntimeOperation;
 use pop_runtime_native_abi::{
-    ABI_SUPPORT_SYMBOL, GC_SAFE_POINT_V2_SYMBOL, INVALID_HANDLE, NATIVE_ABI_1_VERSION,
-    NATIVE_ABI_2_VERSION, symbol,
+    ABI_SUPPORT_SYMBOL, ALLOCATE_INITIALIZED_OBJECT_AT_SITE_AND_STORE_ARRAY_SYMBOL,
+    ALLOCATE_INITIALIZED_SELF_REFERENTIAL_OBJECT_AT_SITE_SYMBOL,
+    ARRAY_GET_OBJECT_FIELD_CHECKED_SYMBOL, AllocationSiteDescriptorAbi, CodecEventStatus,
+    CodecEventTag, CodecReadEventAbi, CodecWriteEventAbi, GC_SAFE_POINT_V2_SYMBOL, INVALID_HANDLE,
+    ITERATION_MAKE_SYMBOL, NATIVE_ABI_1_VERSION, NATIVE_ABI_2_VERSION, symbol,
 };
 
 #[test]
 fn abi_version_and_invalid_handle_are_explicit() {
     assert_eq!(NATIVE_ABI_1_VERSION.major(), 1);
-    assert_eq!(NATIVE_ABI_1_VERSION.minor(), 19);
+    assert_eq!(NATIVE_ABI_1_VERSION.minor(), 22);
     assert_eq!(NATIVE_ABI_2_VERSION.major(), 2);
     assert_eq!(NATIVE_ABI_2_VERSION.minor(), 0);
     assert_ne!(NATIVE_ABI_1_VERSION, NATIVE_ABI_2_VERSION);
@@ -23,6 +26,7 @@ fn supported_symbols_are_unique_and_native() {
     let operations = [
         RuntimeOperation::AllocateObject,
         RuntimeOperation::AllocateObjectInitialized,
+        RuntimeOperation::AllocateObjectInitializedAtSite,
         RuntimeOperation::AllocateArray,
         RuntimeOperation::AllocateArrayFilled,
         RuntimeOperation::AllocateTable,
@@ -109,10 +113,8 @@ fn supported_symbols_are_unique_and_native() {
 
 #[test]
 fn codec_event_abi_has_closed_widths_and_statuses() {
-    let _write: Option<pop_runtime_native_abi::CodecWriteEventAbi> = None;
-    let _read: Option<pop_runtime_native_abi::CodecReadEventAbi> = None;
-    use pop_runtime_native_abi::{CodecEventStatus, CodecEventTag};
-
+    assert!(std::mem::size_of::<CodecWriteEventAbi>() > 0);
+    assert!(std::mem::size_of::<CodecReadEventAbi>() > 0);
     assert_eq!(CodecEventStatus::from_raw(0), Some(CodecEventStatus::Ok));
     assert_eq!(
         CodecEventStatus::from_raw(3),
@@ -122,7 +124,45 @@ fn codec_event_abi_has_closed_widths_and_statuses() {
     assert_eq!(CodecEventTag::from_raw(0), Some(CodecEventTag::RecordStart));
     assert_eq!(CodecEventTag::from_raw(26), Some(CodecEventTag::Bytes));
     assert_eq!(CodecEventTag::from_raw(27), None);
-    assert_eq!(NATIVE_ABI_1_VERSION.minor(), 19);
+    assert_eq!(NATIVE_ABI_1_VERSION.minor(), 22);
+}
+
+#[test]
+fn allocation_site_descriptor_abi_is_fixed_width_and_has_one_symbol() {
+    assert!(std::mem::size_of::<AllocationSiteDescriptorAbi>() > 0);
+    assert_eq!(
+        symbol(RuntimeOperation::AllocateObjectInitializedAtSite),
+        Some("pop_rt_allocate_initialized_object_at_site")
+    );
+}
+
+#[test]
+fn adjacent_heap_fusion_symbols_are_exact_and_distinct() {
+    assert_eq!(
+        ALLOCATE_INITIALIZED_OBJECT_AT_SITE_AND_STORE_ARRAY_SYMBOL,
+        "pop_rt_allocate_initialized_object_at_site_and_store_array"
+    );
+    assert_eq!(
+        ARRAY_GET_OBJECT_FIELD_CHECKED_SYMBOL,
+        "pop_rt_array_get_object_field_checked"
+    );
+    assert_ne!(
+        ALLOCATE_INITIALIZED_OBJECT_AT_SITE_AND_STORE_ARRAY_SYMBOL,
+        ARRAY_GET_OBJECT_FIELD_CHECKED_SYMBOL
+    );
+}
+
+#[test]
+fn abi_one_twenty_two_layout_symbols_are_exact_and_distinct() {
+    assert_eq!(
+        ALLOCATE_INITIALIZED_SELF_REFERENTIAL_OBJECT_AT_SITE_SYMBOL,
+        "pop_rt_allocate_initialized_self_referential_object_at_site"
+    );
+    assert_eq!(ITERATION_MAKE_SYMBOL, "pop_rt_iteration_make");
+    assert_ne!(
+        ALLOCATE_INITIALIZED_SELF_REFERENTIAL_OBJECT_AT_SITE_SYMBOL,
+        ITERATION_MAKE_SYMBOL
+    );
 }
 
 #[test]

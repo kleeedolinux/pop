@@ -9,6 +9,10 @@ license = "Apache-2.0"
 path = "src/lib.rs"
 crate-type = ["rlib", "staticlib"]
 
+[features]
+default = []
+production-generational = []
+
 [[bench]]
 name = "scheduler"
 harness = false

@@ -1,14 +1,17 @@
 //! Closed native adapters for reserved nominal collection iteration.
 
+mod constructor;
+
 use pop_runtime_collector::StableGenerationalRuntime;
 use pop_runtime_interface::{
-    AllocationClass, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot,
-    RuntimeAdapter, RuntimeTypeId,
+    ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot, RuntimeAdapter, RuntimeTypeId,
 };
 use pop_runtime_native_abi::{IterationCollectionKind, IterationStatus};
 
 use crate::range::{load_range, range_iteration_step};
 use crate::state::{abi_lists, abi_tables, lock_abi_runtime};
+
+pub use constructor::pop_rt_iteration_make;
 
 const SOURCE_SLOT: u32 = 0;
 const KIND_SLOT: u32 = 1;
@@ -56,8 +59,11 @@ pub extern "C" fn pop_rt_iteration_acquire(source: u64, kind: u8) -> u64 {
     let Ok(object_map) = ObjectMap::new(5, vec![ObjectSlot::new(SOURCE_SLOT)]) else {
         return 0;
     };
-    let request =
-        ObjectAllocationRequest::new(RuntimeTypeId::new(0), AllocationClass::Mature, object_map);
+    let request = ObjectAllocationRequest::new(
+        RuntimeTypeId::new(0),
+        crate::allocation::native_default_allocation_class(),
+        object_map,
+    );
     let Ok(iterator) = runtime.allocate_object(&request) else {
         return 0;
     };
@@ -219,16 +225,27 @@ fn table_iteration_item(
             ObjectSlot::new(entry.saturating_mul(2).saturating_add(1)),
         )
         .map_err(|_| IterationStatus::Failure)?;
-    let mut references = Vec::new();
-    if table.key_map == pop_runtime_interface::ArrayElementMap::ManagedReference {
-        references.push(ObjectSlot::new(0));
-    }
-    if table.value_map == pop_runtime_interface::ArrayElementMap::ManagedReference {
-        references.push(ObjectSlot::new(1));
-    }
-    let tuple_map = ObjectMap::new(2, references).map_err(|_| IterationStatus::Failure)?;
-    let request =
-        ObjectAllocationRequest::new(RuntimeTypeId::new(0), AllocationClass::Mature, tuple_map);
+    let tuple_map = match (table.key_map, table.value_map) {
+        (
+            pop_runtime_interface::ArrayElementMap::Scalar,
+            pop_runtime_interface::ArrayElementMap::Scalar,
+        ) => ObjectMap::scalar(2),
+        (
+            pop_runtime_interface::ArrayElementMap::ManagedReference,
+            pop_runtime_interface::ArrayElementMap::ManagedReference,
+        ) => ObjectMap::homogeneous_references(2),
+        (pop_runtime_interface::ArrayElementMap::ManagedReference, _) => {
+            ObjectMap::strided_references(2, 0, 2).expect("closed table-key tuple map")
+        }
+        (_, pop_runtime_interface::ArrayElementMap::ManagedReference) => {
+            ObjectMap::strided_references(2, 1, 2).expect("closed table-value tuple map")
+        }
+    };
+    let request = ObjectAllocationRequest::new(
+        RuntimeTypeId::new(0),
+        crate::allocation::native_default_allocation_class(),
+        tuple_map,
+    );
     let tuple = runtime
         .allocate_object(&request)
         .map_err(|_| IterationStatus::Failure)?;

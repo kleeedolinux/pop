@@ -22,6 +22,7 @@ use super::memory::{
 };
 use super::ownership::IsolationState;
 use super::pinning::{PinningConfig, PinningState, PinningTelemetry};
+use super::pretenuring::{AdaptivePretenuringConfig, AdaptivePretenuringState};
 use super::task_roots::{TaskFrameRootConfig, TaskFrameRootState};
 use super::workers::{
     BackgroundWorkerConfig, BackgroundWorkerPool, BackgroundWorkerStartError,
@@ -32,6 +33,7 @@ use super::workers::{
 pub struct MajorCollectorConfig {
     work_budget: usize,
     large_object_scan_chunk_slots: usize,
+    barrier_buffer_capacity: usize,
 }
 
 impl MajorCollectorConfig {
@@ -52,6 +54,7 @@ impl MajorCollectorConfig {
             } else {
                 large_object_scan_chunk_slots
             },
+            barrier_buffer_capacity: 64,
         }
     }
 
@@ -63,6 +66,17 @@ impl MajorCollectorConfig {
     #[must_use]
     pub const fn large_object_scan_chunk_slots(self) -> usize {
         self.large_object_scan_chunk_slots
+    }
+
+    #[must_use]
+    pub const fn with_barrier_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.barrier_buffer_capacity = if capacity == 0 { 1 } else { capacity };
+        self
+    }
+
+    #[must_use]
+    pub const fn barrier_buffer_capacity(self) -> usize {
+        self.barrier_buffer_capacity
     }
 }
 
@@ -146,6 +160,7 @@ pub(crate) struct MajorCycle {
     pub(crate) pending_large_object_scan_chunks: Vec<LargeObjectScanChunk>,
     pub(crate) prefer_large_object_scan_chunk: bool,
     pub(crate) satb: Vec<ManagedReference>,
+    pub(crate) barrier_buffers: BTreeMap<MutatorId, Vec<ManagedReference>>,
     pub(crate) seen: BTreeSet<ManagedReference>,
     pub(crate) marked_mature: BTreeSet<ManagedReference>,
     pub(crate) sweep_cursor: Option<ManagedReference>,
@@ -153,6 +168,18 @@ pub(crate) struct MajorCycle {
     pub(crate) sweep_entries_examined: u64,
     pub(crate) reclaimed: u64,
     pub(crate) scanned: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PendingBackgroundWork {
+    Mark(usize),
+    Sweep(usize),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PendingCardRefinement {
+    pub(crate) count: usize,
+    pub(crate) mutation_version: u64,
 }
 
 impl MajorCycle {
@@ -163,6 +190,7 @@ impl MajorCycle {
             pending_large_object_scan_chunks: Vec::new(),
             prefer_large_object_scan_chunk: true,
             satb: Vec::new(),
+            barrier_buffers: BTreeMap::new(),
             seen: BTreeSet::new(),
             marked_mature: BTreeSet::new(),
             sweep_cursor: None,
@@ -186,8 +214,13 @@ pub struct GenerationalRuntime {
     pub(crate) config: MajorCollectorConfig,
     pub(crate) memory: MemoryController,
     pub(crate) workers: Option<BackgroundWorkerPool>,
+    pub(crate) production_concurrent: bool,
+    pub(crate) pending_background_work: Option<PendingBackgroundWork>,
+    pub(crate) pending_card_refinement: Option<PendingCardRefinement>,
+    pub(crate) reference_mutation_version: u64,
     pub(crate) isolation: IsolationState,
     pub(crate) pinning: PinningState,
+    pub(crate) pretenuring: AdaptivePretenuringState,
     pub(crate) scheduler: SchedulerId,
     pub(crate) arenas: ArenaState,
     pub(crate) minor_requested: BTreeSet<SchedulerId>,
@@ -202,6 +235,7 @@ pub struct GenerationalRuntime {
         (ManagedReference, pop_runtime_interface::PinHandle),
     >,
     pub(crate) next_ffi_bytes_borrow: u64,
+    pub(crate) deferred_mature: Vec<super::ReservedMaturePublication>,
 }
 
 impl GenerationalRuntime {
@@ -246,8 +280,13 @@ impl GenerationalRuntime {
             config,
             memory: MemoryController::new(memory),
             workers: None,
+            production_concurrent: false,
+            pending_background_work: None,
+            pending_card_refinement: None,
+            reference_mutation_version: 0,
             isolation: IsolationState::new(),
             pinning: PinningState::new(PinningConfig::default()),
+            pretenuring: AdaptivePretenuringState::new(AdaptivePretenuringConfig::default()),
             scheduler: SchedulerId::new(1),
             arenas: ArenaState::new(),
             minor_requested: BTreeSet::new(),
@@ -259,6 +298,7 @@ impl GenerationalRuntime {
             task_frame_roots: TaskFrameRootState::new(TaskFrameRootConfig::default()),
             ffi_bytes_borrows: BTreeMap::new(),
             next_ffi_bytes_borrow: 0,
+            deferred_mature: Vec::new(),
         }
     }
 
@@ -281,6 +321,13 @@ impl GenerationalRuntime {
     }
 
     #[must_use]
+    pub fn with_adaptive_pretenuring_config(config: AdaptivePretenuringConfig) -> Self {
+        let mut runtime = Self::new();
+        runtime.pretenuring = AdaptivePretenuringState::new(config);
+        runtime
+    }
+
+    #[must_use]
     pub const fn active_scheduler(&self) -> SchedulerId {
         self.scheduler
     }
@@ -295,6 +342,21 @@ impl GenerationalRuntime {
     ) -> Result<Self, BackgroundWorkerStartError> {
         let mut runtime = Self::new();
         runtime.start_background_workers(workers)?;
+        Ok(runtime)
+    }
+
+    /// Creates the selectable production collector with persistent workers and
+    /// mutator-overlapped mature tracing/sweeping slices.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed startup failure when a host worker cannot be created.
+    pub fn production_with_background_workers(
+        workers: BackgroundWorkerConfig,
+    ) -> Result<Self, BackgroundWorkerStartError> {
+        let mut runtime = Self::new();
+        runtime.start_background_workers(workers)?;
+        runtime.production_concurrent = true;
         Ok(runtime)
     }
 
@@ -339,8 +401,11 @@ impl GenerationalRuntime {
     }
 
     #[must_use]
-    pub const fn collection_requested(&self) -> bool {
-        self.major_requested || self.major_cycle_active() || self.major_epoch.is_some()
+    pub fn collection_requested(&self) -> bool {
+        !self.minor_requested.is_empty()
+            || self.major_requested
+            || self.major_cycle_active()
+            || self.major_epoch.is_some()
     }
 
     #[must_use]
@@ -356,11 +421,19 @@ impl GenerationalRuntime {
     #[must_use]
     pub fn contains(&self, reference: ManagedReference) -> bool {
         self.nursery.contains(reference)
+            || self
+                .deferred_mature
+                .iter()
+                .any(|publication| publication.contains(reference))
     }
 
     #[must_use]
     pub fn object_count(&self) -> usize {
-        self.nursery.object_count()
+        self.deferred_mature
+            .iter()
+            .fold(self.nursery.object_count(), |count, publication| {
+                count.saturating_add(publication.initialized_count())
+            })
     }
 
     #[must_use]
@@ -371,6 +444,42 @@ impl GenerationalRuntime {
     #[must_use]
     pub fn page_descriptor(&self, page: PageId) -> Option<&PageDescriptor> {
         self.allocation.page(page)
+    }
+
+    #[must_use]
+    pub fn payload_is_page_backed(&self, reference: ManagedReference) -> bool {
+        self.nursery
+            .objects
+            .get(&reference)
+            .is_some_and(|object| object.allocation.slots.is_page_backed())
+            || self
+                .deferred_mature
+                .iter()
+                .any(|publication| publication.contains(reference))
+    }
+
+    #[must_use]
+    pub fn layout_is_page_shared(&self, reference: ManagedReference) -> bool {
+        let Some(placement) = self.allocation.placement(reference) else {
+            return false;
+        };
+        let Some(page) = self.allocation.page(placement.page()) else {
+            return false;
+        };
+        if let Some(object) = self.nursery.objects.get(&reference) {
+            return page.shares_object_map(&object.allocation.object_map);
+        }
+        self.deferred_mature
+            .iter()
+            .find(|publication| publication.contains(reference))
+            .is_some_and(|publication| page.shares_object_map(&publication.object_map))
+    }
+
+    #[must_use]
+    pub fn page_payload_word(&self, page: PageId, index: usize) -> Option<u64> {
+        self.allocation
+            .page_payload_word(page, index)
+            .map(crate::heap::SlotValue::raw)
     }
 
     #[must_use]
@@ -386,6 +495,18 @@ impl GenerationalRuntime {
     #[must_use]
     pub fn background_worker_telemetry(&self) -> Option<BackgroundWorkerTelemetry> {
         self.workers.as_ref().map(BackgroundWorkerPool::telemetry)
+    }
+
+    #[must_use]
+    pub const fn background_work_in_flight(&self) -> bool {
+        self.pending_background_work.is_some() || self.pending_card_refinement.is_some()
+    }
+
+    #[must_use]
+    pub fn pretenured_allocation_sites(
+        &self,
+    ) -> BTreeSet<pop_runtime_interface::RuntimeAllocationSiteId> {
+        self.pretenuring.pretenured_sites()
     }
 
     #[must_use]

@@ -60,12 +60,104 @@ rescue RuntimeError => error
   BenchmarkAssertions.includes(error.message, "checksum mismatch")
 end
 
+affinity_runner = PopBenchmark::Runner.new(
+  samples: 1,
+  warmups: 0,
+  selected_runtimes: ["poplang"],
+  selected_workloads: ["objectArray"],
+  cpu_affinity: 2
+)
+BenchmarkAssertions.assert(
+  affinity_runner.send(:affinity_command, ["benchmark"]) ==
+    ["taskset", "--cpu-list", "2", "benchmark"],
+  "declared CPU affinity must wrap every measured execution"
+)
+
 pop_runtime = PopBenchmark::REGISTRY.runtimes.find { |runtime| runtime.id == "poplang" }
 allocation_churn = workloads.find { |workload| workload.id == "allocationChurn" }
 pop_result = validator.send(:result, pop_runtime, allocation_churn, [0.01])
 BenchmarkAssertions.assert(
   pop_result.fetch("collectorStage") == "NativeStableGenerationalConformance",
   "Pop Lang benchmark results must identify the native collector stage"
+)
+
+begin
+  validator.send(
+    :execute,
+    [RbConfig.ruby, "-e", "puts 0"],
+    allocation_churn
+  )
+  raise "a timed checksum mismatch was accepted"
+rescue RuntimeError => error
+  BenchmarkAssertions.includes(error.message, "checksum mismatch")
+end
+
+def heap_gate_document
+  host = {
+    "targetArchitecture" => "x86_64",
+    "targetOperatingSystem" => "linux",
+    "availableParallelism" => 12,
+    "processorIdentity" => "test processor",
+    "cpuAffinity" => "unrestricted"
+  }
+  results = %w[allocationChurn objectArray].map do |workload|
+    expected = PopBenchmark::REGISTRY.workloads.find { |entry| entry.id == workload }.expected_output
+    {
+      "runtime" => "poplang",
+      "collectorStage" => "NativeStableGenerationalConformance",
+      "workload" => workload,
+      "samplesNanoseconds" => Array.new(50, 100),
+      "samplePeakRssKiB" => Array.new(50, 1_000),
+      "medianNanoseconds" => 100,
+      "p99Nanoseconds" => 100,
+      "peakRssKiB" => 1_000,
+      "workloadSourceSha256" => workload == "allocationChurn" ? "a" * 64 : "b" * 64,
+      "expectedChecksumSha256" => Digest::SHA256.hexdigest(expected),
+      "checksumValidated" => true
+    }
+  end
+  {
+    "schemaVersion" => 3,
+    "samples" => 50,
+    "timingMeasurement" => "monotonic wall clock, integer nanoseconds",
+    "memoryMeasurement" => "maximum resident set, KiB",
+    "hostProfile" => host,
+    "results" => results
+  }
+end
+
+baseline = heap_gate_document
+candidate = Marshal.load(Marshal.dump(baseline))
+candidate.fetch("results").each do |result|
+  result["samplesNanoseconds"] = Array.new(50, 105)
+  result["medianNanoseconds"] = 105
+  result["p99Nanoseconds"] = 105
+  result["samplePeakRssKiB"] = Array.new(50, 1_050)
+  result["peakRssKiB"] = 1_050
+end
+gate = PopBenchmark::HeapGate.evaluate(baseline, candidate)
+BenchmarkAssertions.assert(gate.fetch("passed"), "an exact 5% heap regression must pass")
+
+candidate.fetch("results").find { |result| result.fetch("workload") == "objectArray" }.tap do |result|
+  result["samplesNanoseconds"] = Array.new(50, 106)
+  result["medianNanoseconds"] = 106
+  result["p99Nanoseconds"] = 106
+end
+gate = PopBenchmark::HeapGate.evaluate(baseline, candidate)
+BenchmarkAssertions.assert(!gate.fetch("passed"), "a heap regression above 5% must fail")
+BenchmarkAssertions.assert(
+  gate.fetch("failures").any? { |failure| failure.include?("objectArray median") },
+  "the gate must identify the regressed workload and metric"
+)
+
+incomplete = Marshal.load(Marshal.dump(baseline))
+incomplete["hostProfile"]["processorIdentity"] = "different processor"
+incomplete["results"].reject! { |result| result.fetch("workload") == "objectArray" }
+gate = PopBenchmark::HeapGate.evaluate(baseline, incomplete)
+BenchmarkAssertions.assert(!gate.fetch("passed"), "incompatible incomplete evidence must fail")
+BenchmarkAssertions.assert(
+  gate.fetch("failures").length >= 2,
+  "the heap gate must report all independent evidence failures"
 )
 
 document = {

@@ -3,7 +3,22 @@ use pop_runtime_interface::RuntimeOperation;
 /// ABI 1.11 lookup adapter that separates presence from a scalar payload.
 pub const TABLE_GET_CHECKED_SYMBOL: &str = "pop_rt_table_get_checked";
 
-/// Returns the native C symbol for an operation implemented through ABI 1.19.
+/// ABI 1.21 verified initialized-object/managed-array-store adapter.
+pub const ALLOCATE_INITIALIZED_OBJECT_AT_SITE_AND_STORE_ARRAY_SYMBOL: &str =
+    "pop_rt_allocate_initialized_object_at_site_and_store_array";
+
+/// ABI 1.21 verified checked-array-read/static-field-read adapter.
+pub const ARRAY_GET_OBJECT_FIELD_CHECKED_SYMBOL: &str = "pop_rt_array_get_object_field_checked";
+
+/// ABI 1.22 atomic initialized allocation for compiler-known self-reference
+/// slots.
+pub const ALLOCATE_INITIALIZED_SELF_REFERENTIAL_OBJECT_AT_SITE_SYMBOL: &str =
+    "pop_rt_allocate_initialized_self_referential_object_at_site";
+
+/// ABI 1.22 closed atomic constructor for one native iterator step.
+pub const ITERATION_MAKE_SYMBOL: &str = "pop_rt_iteration_make";
+
+/// Returns the native C symbol for an operation implemented through ABI 1.22.
 ///
 /// Operations outside the native bootstrap capability set fail closed. MIR and
 /// alternate runtime implementations continue to use the semantic operation.
@@ -12,6 +27,9 @@ pub const fn symbol(operation: RuntimeOperation) -> Option<&'static str> {
     match operation {
         RuntimeOperation::AllocateObject => Some("pop_rt_allocate_object"),
         RuntimeOperation::AllocateObjectInitialized => Some("pop_rt_allocate_initialized_object"),
+        RuntimeOperation::AllocateObjectInitializedAtSite => {
+            Some("pop_rt_allocate_initialized_object_at_site")
+        }
         RuntimeOperation::AllocateArray => Some("pop_rt_allocate_array"),
         RuntimeOperation::AllocateArrayFilled => Some("pop_rt_allocate_array_filled"),
         RuntimeOperation::AllocateTable => Some("pop_rt_allocate_table"),

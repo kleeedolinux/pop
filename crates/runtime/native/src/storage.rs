@@ -2,144 +2,22 @@
 
 use pop_runtime_interface::{ManagedReference, ObjectSlot};
 
-use crate::state::{abi_tables, lock_abi_runtime};
+use crate::state::lock_abi_runtime;
 
-#[allow(unsafe_code)]
-#[unsafe(no_mangle)]
-pub extern "C" fn pop_rt_table_get(reference: u64, key: u64, managed_key: u8) -> u64 {
-    table_value(reference, key, managed_key).unwrap_or(0)
-}
+mod direct;
+mod table;
 
-fn table_value(reference: u64, key: u64, managed_key: u8) -> Option<u64> {
-    let Ok(runtime) = lock_abi_runtime() else {
-        return None;
-    };
-    let Ok(tables) = abi_tables().lock() else {
-        return None;
-    };
-    let table = tables.get(&reference)?;
-    if u8::from(table.key_map == pop_runtime_interface::ArrayElementMap::ManagedReference)
-        != u8::from(managed_key != 0)
-    {
-        return None;
-    }
-    let owner = ManagedReference::new(reference);
-    for entry in 0..table.length {
-        let key_slot = ObjectSlot::new(entry * 2);
-        let Ok(candidate) = runtime.load_slot_value(owner, key_slot) else {
-            return None;
-        };
-        let equal = if managed_key == 0 || candidate == 0 || key == 0 {
-            candidate == key
-        } else {
-            runtime.strings_equal(ManagedReference::new(candidate), ManagedReference::new(key))
-        };
-        if equal {
-            return runtime
-                .load_slot_value(owner, ObjectSlot::new(entry * 2 + 1))
-                .ok();
-        }
-    }
-    None
-}
-
-/// Loads one table value through `output` and reports key presence.
-///
-/// # Safety
-///
-/// `output` must address one writable `u64` for the duration of this call.
-#[allow(unsafe_code)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn pop_rt_table_get_checked(
-    reference: u64,
-    key: u64,
-    managed_key: u8,
-    output: *mut u64,
-) -> u8 {
-    if output.is_null() {
-        return 0;
-    }
-    let Some(value) = table_value(reference, key, managed_key) else {
-        return 0;
-    };
-    // SAFETY: The caller contract requires one writable `u64`.
-    unsafe { output.write(value) };
-    1
-}
-
-#[allow(unsafe_code)]
-#[unsafe(no_mangle)]
-pub extern "C" fn pop_rt_table_set(
-    reference: u64,
-    key: u64,
-    value: u64,
-    managed_key: u8,
-    managed_value: u8,
-) -> u8 {
-    let Ok(mut runtime) = lock_abi_runtime() else {
-        return 0;
-    };
-    let Ok(mut tables) = abi_tables().lock() else {
-        return 0;
-    };
-    let Some(table) = tables.get_mut(&reference) else {
-        return 0;
-    };
-    if u8::from(table.key_map == pop_runtime_interface::ArrayElementMap::ManagedReference)
-        != u8::from(managed_key != 0)
-        || u8::from(table.value_map == pop_runtime_interface::ArrayElementMap::ManagedReference)
-            != u8::from(managed_value != 0)
-    {
-        return 0;
-    }
-    let owner = ManagedReference::new(reference);
-    for entry in 0..table.length {
-        let key_slot = ObjectSlot::new(entry * 2);
-        let Ok(candidate) = runtime.load_slot_value(owner, key_slot) else {
-            return 0;
-        };
-        let equal = if managed_key == 0 || candidate == 0 || key == 0 {
-            candidate == key
-        } else {
-            runtime.strings_equal(ManagedReference::new(candidate), ManagedReference::new(key))
-        };
-        if equal {
-            return u8::from(
-                runtime
-                    .store_slot_value(owner, ObjectSlot::new(entry * 2 + 1), value)
-                    .is_ok(),
-            );
-        }
-    }
-    if table.length == table.capacity {
-        let Some(new_capacity) = table.capacity.max(2).checked_mul(2) else {
-            return 0;
-        };
-        if runtime
-            .grow_table(
-                owner,
-                table.capacity,
-                new_capacity,
-                table.key_map,
-                table.value_map,
-            )
-            .is_err()
-        {
-            return 0;
-        }
-        table.capacity = new_capacity;
-    }
-    let key_slot = ObjectSlot::new(table.length * 2);
-    if runtime.store_slot_value(owner, key_slot, key).is_err()
-        || runtime
-            .store_slot_value(owner, ObjectSlot::new(table.length * 2 + 1), value)
-            .is_err()
-    {
-        return 0;
-    }
-    table.length += 1;
-    1
-}
+use direct::{
+    CachedReferenceStore, direct_array_object_field_value,
+    direct_page_store_array_reference_cached, direct_page_store_array_reference_slow,
+    direct_page_store_scalar, direct_page_value,
+};
+pub use direct::{
+    direct_page_access_miss_count, direct_page_mutation_miss_count,
+    direct_reference_mutation_miss_count,
+};
+pub(crate) use direct::{quiesce_direct_accesses, seed_direct_array_reference_store};
+pub use table::{pop_rt_table_get, pop_rt_table_get_checked, pop_rt_table_set};
 
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
@@ -147,28 +25,107 @@ pub extern "C" fn pop_rt_array_get(reference: u64, index: u64) -> u64 {
     let Some(slot) = array_slot(index) else {
         return 0;
     };
+    let reference = ManagedReference::new(reference);
+    if let Some(value) = direct_page_value(reference, slot, true) {
+        return value;
+    }
     let Ok(runtime) = lock_abi_runtime() else {
         return 0;
     };
-    runtime
-        .load_array_value(ManagedReference::new(reference), slot)
-        .unwrap_or(0)
+    runtime.load_array_value(reference, slot).unwrap_or(0)
 }
 
 #[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn pop_rt_array_set(reference: u64, index: u64, value: u64) -> u8 {
+    store_array_value(reference, index, value)
+}
+
+#[inline]
+pub(crate) fn store_array_value(reference: u64, index: u64, value: u64) -> u8 {
     let Some(slot) = array_slot(index) else {
         return 0;
     };
+    let reference = ManagedReference::new(reference);
+    match direct_page_store_array_reference_cached(reference, slot, value) {
+        CachedReferenceStore::Stored => return 1,
+        CachedReferenceStore::Rejected => {
+            return u8::from(direct_page_store_array_reference_slow(
+                reference, slot, value,
+            ));
+        }
+        CachedReferenceStore::OwnerMiss => {}
+    }
+    if direct_page_store_scalar(reference, slot, true, value) {
+        return 1;
+    }
+    if direct_page_store_array_reference_slow(reference, slot, value) {
+        return 1;
+    }
     let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
-    u8::from(
-        runtime
-            .store_array_value(ManagedReference::new(reference), slot, value)
-            .is_ok(),
-    )
+    u8::from(runtime.store_array_value(reference, slot, value).is_ok())
+}
+
+/// Loads one checked managed-reference array element and one statically
+/// resolved object field through the ABI 1.21 adjacent-pair adapter.
+///
+/// # Safety
+///
+/// `output` must address one writable `u64` for the duration of this call.
+#[allow(unsafe_code)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pop_rt_array_get_object_field_checked(
+    reference: u64,
+    index: u64,
+    field: u64,
+    output: *mut u64,
+) -> u8 {
+    let Some(owner_slot) = array_slot(index) else {
+        return 0;
+    };
+    let Some(field_slot) = array_slot(field) else {
+        return 0;
+    };
+    if output.is_null() {
+        return 0;
+    }
+    let owner = ManagedReference::new(reference);
+    if let Some(value) = direct_array_object_field_value(owner, owner_slot, field_slot) {
+        // SAFETY: the caller contract requires one writable `u64`.
+        unsafe { output.write(value) };
+        return 1;
+    }
+    let target = if let Some(value) = direct_page_value(owner, owner_slot, true) {
+        value
+    } else {
+        let Ok(runtime) = lock_abi_runtime() else {
+            return 0;
+        };
+        let Ok(value) = runtime.load_array_value(owner, owner_slot) else {
+            return 0;
+        };
+        value
+    };
+    if target == 0 {
+        return 0;
+    }
+    let target = ManagedReference::new(target);
+    let value = if let Some(value) = direct_page_value(target, field_slot, false) {
+        value
+    } else {
+        let Ok(runtime) = lock_abi_runtime() else {
+            return 0;
+        };
+        let Ok(value) = runtime.load_slot_value(target, field_slot) else {
+            return 0;
+        };
+        value
+    };
+    // SAFETY: the caller contract requires one writable `u64`.
+    unsafe { output.write(value) };
+    1
 }
 
 /// Writes the fixed array length through `output` and reports success.
@@ -211,10 +168,16 @@ pub unsafe extern "C" fn pop_rt_array_get_checked(
     if output.is_null() {
         return 0;
     }
+    let reference = ManagedReference::new(reference);
+    if let Some(value) = direct_page_value(reference, slot, true) {
+        // SAFETY: The caller contract requires one writable `u64`.
+        unsafe { output.write(value) };
+        return 1;
+    }
     let Ok(runtime) = lock_abi_runtime() else {
         return 0;
     };
-    let Ok(value) = runtime.load_array_value(ManagedReference::new(reference), slot) else {
+    let Ok(value) = runtime.load_array_value(reference, slot) else {
         return 0;
     };
     // SAFETY: The caller contract requires one writable `u64`.
@@ -242,12 +205,14 @@ pub extern "C" fn pop_rt_field_get(reference: u64, field: u64) -> u64 {
     let Some(slot) = array_slot(field) else {
         return 0;
     };
+    let reference = ManagedReference::new(reference);
+    if let Some(value) = direct_page_value(reference, slot, false) {
+        return value;
+    }
     let Ok(runtime) = lock_abi_runtime() else {
         return 0;
     };
-    runtime
-        .load_slot_value(ManagedReference::new(reference), slot)
-        .unwrap_or(0)
+    runtime.load_slot_value(reference, slot).unwrap_or(0)
 }
 
 #[allow(unsafe_code)]
@@ -256,14 +221,14 @@ pub extern "C" fn pop_rt_field_set(reference: u64, field: u64, value: u64) -> u8
     let Some(slot) = array_slot(field) else {
         return 0;
     };
+    let reference = ManagedReference::new(reference);
+    if direct_page_store_scalar(reference, slot, false, value) {
+        return 1;
+    }
     let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
-    u8::from(
-        runtime
-            .store_slot_value(ManagedReference::new(reference), slot, value)
-            .is_ok(),
-    )
+    u8::from(runtime.store_slot_value(reference, slot, value).is_ok())
 }
 
 fn array_slot(index: u64) -> Option<ObjectSlot> {

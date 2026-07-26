@@ -76,6 +76,7 @@
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn reader_never_observes_a_partially_written_top_level_value() {
         let _guard = crate::state::lock_native_runtime_test();
         let writer = allocate_codec_writer();

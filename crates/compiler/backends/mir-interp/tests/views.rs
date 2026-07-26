@@ -114,7 +114,7 @@ fn int_value(value: i64) -> MirValue {
 }
 
 fn is_bounds_violation(
-    result: Result<Vec<MirValue>, pop_backend_mir_interp::ExecutionError>,
+    result: &Result<Vec<MirValue>, pop_backend_mir_interp::ExecutionError>,
 ) -> bool {
     matches!(
         result,
@@ -255,7 +255,7 @@ fn bytes_views_enforce_one_based_checked_ranges_and_optional_access() {
     );
     for (start, length) in [(0, 0), (6, 0), (4, 2), (1, -1), (2, i64::MAX)] {
         assert!(
-            is_bounds_violation(interpreter.call(
+            is_bounds_violation(&interpreter.call(
                 SymbolId::from_raw(0),
                 &[MirValue::Bytes(owner), int_value(start), int_value(length)],
             )),

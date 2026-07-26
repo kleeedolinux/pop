@@ -1,26 +1,32 @@
 use pop_runtime_native::{
     abi_safe_point, allocate_codec_reader, allocate_codec_writer, allocate_immutable_bytes,
     allocate_mapped_object, allocate_platform_arguments, allocate_process_arguments,
-    allocate_utf8_string_literal, pop_rt_abi_major, pop_rt_abi_minor, pop_rt_allocate_array,
-    pop_rt_allocate_array_filled, pop_rt_allocate_initialized_object, pop_rt_allocate_object,
+    allocate_utf8_string_literal, allocation_site_descriptor_count,
+    allocation_site_global_lookup_count, direct_page_access_miss_count,
+    direct_page_mutation_miss_count, direct_reference_mutation_miss_count, pop_rt_abi_major,
+    pop_rt_abi_minor, pop_rt_allocate_array, pop_rt_allocate_array_filled,
+    pop_rt_allocate_initialized_object, pop_rt_allocate_initialized_object_at_site,
+    pop_rt_allocate_initialized_object_at_site_and_store_array,
+    pop_rt_allocate_initialized_self_referential_object_at_site, pop_rt_allocate_object,
     pop_rt_allocate_table, pop_rt_array_fill, pop_rt_array_get, pop_rt_array_get_checked,
-    pop_rt_array_length, pop_rt_array_set, pop_rt_cancel_source_create,
-    pop_rt_cancel_source_release, pop_rt_cancel_source_token, pop_rt_cancel_token_release,
-    pop_rt_codec_read_event, pop_rt_codec_write_event, pop_rt_ffi_buffer_borrow,
-    pop_rt_ffi_buffer_close, pop_rt_ffi_buffer_end_borrow, pop_rt_ffi_buffer_length,
-    pop_rt_ffi_buffer_open, pop_rt_ffi_buffer_read, pop_rt_ffi_buffer_write,
-    pop_rt_ffi_bytes_borrow, pop_rt_ffi_bytes_end_borrow, pop_rt_field_get, pop_rt_field_set,
-    pop_rt_gc_safe_point_v2, pop_rt_gc_stage, pop_rt_iteration_acquire, pop_rt_iteration_next,
-    pop_rt_list_add, pop_rt_list_create, pop_rt_list_get, pop_rt_list_get_checked,
-    pop_rt_list_length, pop_rt_list_set, pop_rt_pin, pop_rt_range_create, pop_rt_release_root,
-    pop_rt_resolve_root, pop_rt_resume, pop_rt_retain_root, pop_rt_string_concat,
-    pop_rt_string_equal, pop_rt_string_format, pop_rt_string_read, pop_rt_supports_abi,
-    pop_rt_suspend, pop_rt_table_get, pop_rt_table_get_checked, pop_rt_table_set,
-    pop_rt_task_cancel, pop_rt_task_cancellation_requested, pop_rt_unpin, request_abi_collection,
+    pop_rt_array_get_object_field_checked, pop_rt_array_length, pop_rt_array_set,
+    pop_rt_cancel_source_create, pop_rt_cancel_source_release, pop_rt_cancel_source_token,
+    pop_rt_cancel_token_release, pop_rt_codec_read_event, pop_rt_codec_write_event,
+    pop_rt_ffi_buffer_borrow, pop_rt_ffi_buffer_close, pop_rt_ffi_buffer_end_borrow,
+    pop_rt_ffi_buffer_length, pop_rt_ffi_buffer_open, pop_rt_ffi_buffer_read,
+    pop_rt_ffi_buffer_write, pop_rt_ffi_bytes_borrow, pop_rt_ffi_bytes_end_borrow,
+    pop_rt_field_get, pop_rt_field_set, pop_rt_gc_safe_point_v2, pop_rt_gc_stage,
+    pop_rt_iteration_acquire, pop_rt_iteration_make, pop_rt_iteration_next, pop_rt_list_add,
+    pop_rt_list_create, pop_rt_list_get, pop_rt_list_get_checked, pop_rt_list_length,
+    pop_rt_list_set, pop_rt_pin, pop_rt_range_create, pop_rt_release_root, pop_rt_resolve_root,
+    pop_rt_resume, pop_rt_retain_root, pop_rt_string_concat, pop_rt_string_equal,
+    pop_rt_string_format, pop_rt_string_read, pop_rt_supports_abi, pop_rt_suspend,
+    pop_rt_table_get, pop_rt_table_get_checked, pop_rt_table_set, pop_rt_task_cancel,
+    pop_rt_task_cancellation_requested, pop_rt_unpin, request_abi_collection,
 };
 use pop_runtime_native_abi::{
-    CodecEventStatus, CodecEventTag, CodecReadEventAbi, CodecWriteEventAbi,
-    IterationCollectionKind, IterationStatus, StringFormatTag,
+    AllocationSiteDescriptorAbi, CodecEventStatus, CodecEventTag, CodecReadEventAbi,
+    CodecWriteEventAbi, IterationCollectionKind, IterationStatus, StringFormatTag,
 };
 use std::ffi::CString;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -36,7 +42,7 @@ fn abi_test_lock() -> MutexGuard<'static, ()> {
 fn native_runtime_exports_the_stable_generational_abi_identity() {
     let _guard = abi_test_lock();
     assert_eq!(pop_rt_abi_major(), 1);
-    assert_eq!(pop_rt_abi_minor(), 19);
+    assert_eq!(pop_rt_abi_minor(), 22);
     assert_eq!(pop_rt_gc_stage(), 2);
     assert_eq!(pop_rt_supports_abi(1, 11), 1);
     assert_eq!(pop_rt_supports_abi(1, 12), 1);
@@ -47,6 +53,8 @@ fn native_runtime_exports_the_stable_generational_abi_identity() {
     assert_eq!(pop_rt_supports_abi(1, 17), 1);
     assert_eq!(pop_rt_supports_abi(1, 18), 1);
     assert_eq!(pop_rt_supports_abi(1, 19), 1);
+    assert_eq!(pop_rt_supports_abi(1, 20), 1);
+    assert_eq!(pop_rt_supports_abi(1, 21), 1);
     assert_eq!(pop_rt_supports_abi(2, 0), 0);
 }
 
@@ -54,8 +62,8 @@ fn native_runtime_exports_the_stable_generational_abi_identity() {
 #[allow(unsafe_code)]
 fn native_codec_abi_returns_actual_bounded_event_fields() {
     let _guard = abi_test_lock();
-    let _write_abi: CodecWriteEventAbi = pop_rt_codec_write_event;
-    let _read_abi: CodecReadEventAbi = pop_rt_codec_read_event;
+    let _: CodecWriteEventAbi = pop_rt_codec_write_event;
+    let _: CodecReadEventAbi = pop_rt_codec_read_event;
     let writer = allocate_codec_writer();
     let label = b"Ready";
     // SAFETY: the label is readable for its exact length during the call.
@@ -85,12 +93,12 @@ fn native_codec_abi_returns_actual_bounded_event_fields() {
         unsafe {
             pop_rt_codec_read_event(
                 reader,
-                &mut tag,
-                &mut ordinal,
-                &mut returned_label,
-                &mut returned_length,
-                &mut auxiliary,
-                &mut scalar,
+                &raw mut tag,
+                &raw mut ordinal,
+                &raw mut returned_label,
+                &raw mut returned_length,
+                &raw mut auxiliary,
+                &raw mut scalar,
             )
         },
         CodecEventStatus::Ok as u8
@@ -99,9 +107,10 @@ fn native_codec_abi_returns_actual_bounded_event_fields() {
     assert_eq!(ordinal, 2);
     assert_eq!(auxiliary, 7);
     assert_eq!(scalar, 0);
+    let returned_length = usize::try_from(returned_length).expect("bounded label length");
     // SAFETY: the label borrow is valid until the next read of this reader.
     assert_eq!(
-        unsafe { std::slice::from_raw_parts(returned_label, returned_length as usize) },
+        unsafe { std::slice::from_raw_parts(returned_label, returned_length) },
         label
     );
 }
@@ -406,6 +415,141 @@ fn initialized_object_allocation_publishes_one_complete_typed_payload() {
 }
 
 #[test]
+#[allow(unsafe_code)]
+fn allocation_site_descriptors_validate_once_and_fail_closed_on_identity_aliasing() {
+    let _guard = abi_test_lock();
+    let child = pop_rt_allocate_object(0);
+    assert_ne!(child, 0);
+    let reference_slots = [1_u32];
+    let descriptor_count = allocation_site_descriptor_count();
+    let global_lookup_count = allocation_site_global_lookup_count();
+    let descriptor = AllocationSiteDescriptorAbi {
+        bubble: 0x00ff_0000,
+        owner: 17,
+        site: 1,
+        runtime_type: 41,
+        allocation_class: 1,
+        reserved: [0; 3],
+        slot_count: 2,
+        reference_count: 1,
+        reference_slots: reference_slots.as_ptr(),
+    };
+    let first_values = [71_u64, child];
+    let second_values = [72_u64, child];
+
+    // SAFETY: the immutable descriptor, reference map, and initializer arrays
+    // remain readable for every call in this scope.
+    let first = unsafe {
+        pop_rt_allocate_initialized_object_at_site(
+            &raw const descriptor,
+            first_values.as_ptr(),
+            first_values.len() as u64,
+        )
+    };
+    let second = unsafe {
+        pop_rt_allocate_initialized_object_at_site(
+            &raw const descriptor,
+            second_values.as_ptr(),
+            second_values.len() as u64,
+        )
+    };
+    assert_ne!(first, 0);
+    assert_ne!(second, 0);
+    assert_eq!(allocation_site_descriptor_count(), descriptor_count + 1);
+    assert_eq!(
+        allocation_site_global_lookup_count(),
+        global_lookup_count + 1,
+        "steady-state allocation must use the validated thread-local descriptor"
+    );
+    assert_eq!(pop_rt_field_get(first, 1), 71);
+    assert_eq!(pop_rt_field_get(second, 1), 72);
+
+    let aliased = AllocationSiteDescriptorAbi {
+        reference_count: 0,
+        reference_slots: std::ptr::null(),
+        ..descriptor
+    };
+    assert_eq!(
+        unsafe {
+            pop_rt_allocate_initialized_object_at_site(
+                &raw const aliased,
+                first_values.as_ptr(),
+                first_values.len() as u64,
+            )
+        },
+        0
+    );
+
+    let noncanonical_slots = [1_u32, 0];
+    let malformed = AllocationSiteDescriptorAbi {
+        site: descriptor.site + 1,
+        reference_count: 2,
+        reference_slots: noncanonical_slots.as_ptr(),
+        ..descriptor
+    };
+    assert_eq!(
+        unsafe {
+            pop_rt_allocate_initialized_object_at_site(
+                &raw const malformed,
+                first_values.as_ptr(),
+                first_values.len() as u64,
+            )
+        },
+        0
+    );
+}
+
+#[test]
+#[allow(unsafe_code)]
+fn self_referential_site_allocation_publishes_the_complete_cycle_atomically() {
+    let _guard = abi_test_lock();
+    let reference_slots = [1_u32];
+    let self_slots = [1_u32];
+    let descriptor = AllocationSiteDescriptorAbi {
+        bubble: 0x00ff_0200,
+        owner: 31,
+        site: 1,
+        runtime_type: 141,
+        allocation_class: 1,
+        reserved: [0; 3],
+        slot_count: 2,
+        reference_count: 1,
+        reference_slots: reference_slots.as_ptr(),
+    };
+    let values = [73_u64, 0];
+
+    // SAFETY: all immutable descriptor, initializer, and self-slot storage
+    // remains readable for the complete call.
+    let reference = unsafe {
+        pop_rt_allocate_initialized_self_referential_object_at_site(
+            &raw const descriptor,
+            values.as_ptr(),
+            values.len() as u64,
+            self_slots.as_ptr(),
+            self_slots.len() as u64,
+        )
+    };
+    assert_ne!(reference, 0);
+    assert_eq!(pop_rt_field_get(reference, 1), 73);
+    assert_eq!(pop_rt_field_get(reference, 2), reference);
+
+    let invalid_self_slots = [0_u32];
+    assert_eq!(
+        unsafe {
+            pop_rt_allocate_initialized_self_referential_object_at_site(
+                &raw const descriptor,
+                values.as_ptr(),
+                values.len() as u64,
+                invalid_self_slots.as_ptr(),
+                invalid_self_slots.len() as u64,
+            )
+        },
+        0,
+        "a scalar slot cannot become an unchecked self edge"
+    );
+}
+
+#[test]
 fn stable_generational_safe_points_preserve_live_native_tokens() {
     let _guard = abi_test_lock();
     let reference = pop_rt_allocate_object(0);
@@ -473,6 +617,71 @@ fn allocation_churn_uses_the_native_stable_generational_path() {
         assert_eq!(abi_safe_point(safe_point, &[]), 1);
     }
     assert_eq!(pop_rt_array_get(last, 1), 0);
+}
+
+#[test]
+#[allow(unsafe_code)]
+fn retained_object_array_keeps_page_backed_payloads_valid_at_scale() {
+    const LENGTH: u64 = 200_000;
+    let _guard = abi_test_lock();
+    let initial = pop_rt_allocate_object(1);
+    assert_ne!(initial, 0);
+    let array = pop_rt_allocate_array_filled(LENGTH, 1, initial);
+    assert_ne!(array, 0);
+    let descriptor = AllocationSiteDescriptorAbi {
+        bubble: 0x00ff_0001,
+        owner: 1,
+        site: 1,
+        runtime_type: 42,
+        allocation_class: 1,
+        reserved: [0; 3],
+        slot_count: 1,
+        reference_count: 0,
+        reference_slots: std::ptr::null(),
+    };
+
+    let mut last_object = 0;
+    for index in 1..=LENGTH {
+        let values = [index];
+        // SAFETY: the immutable descriptor and one initializer remain readable
+        // for the complete allocation call.
+        let object = unsafe {
+            pop_rt_allocate_initialized_object_at_site(
+                &raw const descriptor,
+                values.as_ptr(),
+                values.len() as u64,
+            )
+        };
+        assert_ne!(object, 0);
+        assert_eq!(pop_rt_array_set(array, index, object), 1);
+        last_object = object;
+    }
+
+    let direct_misses = direct_page_access_miss_count();
+    let mut total = 0_u64;
+    for index in 1..=LENGTH {
+        let mut object = 0;
+        // SAFETY: `object` is a live writable word for the complete ABI call.
+        assert_eq!(
+            unsafe { pop_rt_array_get_checked(array, index, &raw mut object) },
+            1
+        );
+        total = total
+            .checked_add(pop_rt_field_get(object, 1))
+            .expect("benchmark checksum");
+    }
+    assert_eq!(total, 20_000_100_000);
+    assert!(
+        direct_page_access_miss_count() - direct_misses <= 128,
+        "contiguous monomorphic pages must amortize checked direct access"
+    );
+
+    for safe_point in 50_000..58_192 {
+        let _ = request_abi_collection();
+        assert_eq!(abi_safe_point(safe_point, &[]), 1);
+    }
+    assert_eq!(pop_rt_array_get(array, 1), 0);
+    assert_eq!(pop_rt_field_get(last_object, 1), 0);
 }
 
 #[test]
@@ -684,6 +893,109 @@ fn native_abi_allocates_and_tracks_opaque_tokens() {
 }
 
 #[test]
+fn scalar_array_and_field_mutation_reuse_checked_direct_page_access() {
+    let _guard = abi_test_lock();
+    let array = pop_rt_allocate_array_filled(2, 0, 0);
+    assert_ne!(array, 0);
+    assert_eq!(pop_rt_array_get(array, 1), 0);
+    let misses = direct_page_mutation_miss_count();
+    assert_eq!(pop_rt_array_set(array, 1, 41), 1);
+    assert_eq!(pop_rt_array_set(array, 2, 42), 1);
+    assert_eq!(direct_page_mutation_miss_count(), misses);
+    assert_eq!(pop_rt_array_get(array, 1), 41);
+    assert_eq!(pop_rt_array_get(array, 2), 42);
+
+    let object = pop_rt_allocate_object(3);
+    assert_ne!(object, 0);
+    assert_eq!(pop_rt_field_get(object, 1), 0);
+    let misses = direct_page_mutation_miss_count();
+    assert_eq!(pop_rt_field_set(object, 1, 43), 1);
+    assert_eq!(pop_rt_field_set(object, 2, 44), 1);
+    assert_eq!(direct_page_mutation_miss_count(), misses);
+    assert_eq!(pop_rt_field_get(object, 1), 43);
+    assert_eq!(pop_rt_field_get(object, 2), 44);
+}
+
+#[test]
+fn managed_array_mutation_reuses_checked_owner_and_target_page_access() {
+    let _guard = abi_test_lock();
+    let array = pop_rt_allocate_array_filled(2, 1, 0);
+    let first = pop_rt_allocate_object(1);
+    let second = pop_rt_allocate_object(1);
+    assert_ne!(array, 0);
+    assert_ne!(first, 0);
+    assert_ne!(second, 0);
+
+    assert_eq!(pop_rt_array_set(array, 1, first), 1);
+    let misses = direct_reference_mutation_miss_count();
+    assert_eq!(pop_rt_array_set(array, 2, second), 1);
+    assert_eq!(direct_reference_mutation_miss_count(), misses);
+    assert_eq!(pop_rt_array_get(array, 1), first);
+    assert_eq!(pop_rt_array_get(array, 2), second);
+    assert_eq!(pop_rt_array_set(array, 1, u64::MAX), 0);
+}
+
+#[test]
+#[allow(unsafe_code)]
+fn adjacent_heap_adapters_preserve_checked_store_and_scalar_zero() {
+    let _guard = abi_test_lock();
+    let array = pop_rt_allocate_array_filled(2, 1, 0);
+    assert_ne!(array, 0);
+    let descriptor = AllocationSiteDescriptorAbi {
+        bubble: 0x00ff_0102,
+        owner: 1,
+        site: 1,
+        runtime_type: 102,
+        allocation_class: 1,
+        reserved: [0; 3],
+        slot_count: 2,
+        reference_count: 0,
+        reference_slots: std::ptr::null(),
+    };
+    let values = [55_u64, 0];
+    let object = unsafe {
+        pop_rt_allocate_initialized_object_at_site_and_store_array(
+            &raw const descriptor,
+            values.as_ptr(),
+            values.len() as u64,
+            array,
+            2,
+        )
+    };
+    assert_ne!(object, 0);
+    assert_eq!(pop_rt_array_get(array, 2), object);
+
+    let mut output = u64::MAX;
+    assert_eq!(
+        unsafe { pop_rt_array_get_object_field_checked(array, 2, 1, &raw mut output) },
+        1
+    );
+    assert_eq!(output, 55);
+    output = u64::MAX;
+    assert_eq!(
+        unsafe { pop_rt_array_get_object_field_checked(array, 2, 2, &raw mut output) },
+        1
+    );
+    assert_eq!(output, 0, "a scalar zero is a successful field result");
+    assert_eq!(
+        unsafe { pop_rt_array_get_object_field_checked(array, 3, 1, &raw mut output) },
+        0
+    );
+    assert_eq!(
+        unsafe {
+            pop_rt_allocate_initialized_object_at_site_and_store_array(
+                &raw const descriptor,
+                values.as_ptr(),
+                values.len() as u64,
+                array,
+                3,
+            )
+        },
+        0
+    );
+}
+
+#[test]
 #[allow(unsafe_code)]
 fn typed_table_abi_replaces_and_grows_without_changing_identity() {
     let _guard = abi_test_lock();
@@ -808,6 +1120,26 @@ fn integer_range_abi_iterates_without_materializing_items() {
         let status = unsafe { pop_rt_iteration_next(iterator, &raw mut value) };
         assert_eq!(status, IterationStatus::End as u8);
     }
+}
+
+#[test]
+fn closed_iteration_constructor_is_atomic_and_validates_its_layout_case() {
+    let _guard = abi_test_lock();
+    let child = pop_rt_allocate_object(0);
+    assert_ne!(child, 0);
+    let item = pop_rt_iteration_make(IterationStatus::Item as u8, child, 1);
+    let end = pop_rt_iteration_make(IterationStatus::End as u8, child, 1);
+    assert_ne!(item, 0);
+    assert_ne!(end, 0);
+    assert_eq!(pop_rt_field_get(item, 1), 0);
+    assert_eq!(pop_rt_field_get(item, 2), child);
+    assert_eq!(pop_rt_field_get(end, 1), 1);
+    assert_eq!(pop_rt_field_get(end, 2), 0);
+    assert_eq!(pop_rt_iteration_make(0, child, 1), 0);
+    assert_eq!(
+        pop_rt_iteration_make(IterationStatus::Item as u8, child, 2),
+        0
+    );
 }
 
 #[test]

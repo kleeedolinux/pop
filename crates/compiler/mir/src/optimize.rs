@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use pop_foundation::{BlockId, MethodId, SymbolId, ValueId};
+use pop_foundation::{AllocationSiteId, BlockId, ClassId, FieldId, MethodId, SymbolId, ValueId};
+use pop_runtime_interface::ObjectMap;
 use pop_types::{FloatValue, IntegerKind, IntegerValue, TypeArena};
 
 use super::{
@@ -16,6 +17,13 @@ enum Constant {
     String(String),
 }
 
+#[derive(Clone)]
+struct TrivialConstructor {
+    class: ClassId,
+    fields: Vec<(FieldId, usize)>,
+    object_map: ObjectMap,
+}
+
 /// Runs portable constant folding and conservative dead code elimination.
 ///
 /// # Errors
@@ -27,6 +35,18 @@ pub fn optimize_mir(
     arena: &TypeArena,
 ) -> Result<MirBubble, Vec<MirVerificationError>> {
     verify_mir_bubble(&bubble, arena)?;
+    let constructors = collect_trivial_constructors(&bubble);
+    for function in &mut bubble.functions {
+        inline_trivial_constructors(function, &constructors);
+    }
+    for method in &mut bubble.methods {
+        inline_trivial_constructors(&mut method.function, &constructors);
+    }
+    for nested in &mut bubble.nested_functions {
+        let mut function = nested.transformation_adapter();
+        inline_trivial_constructors(&mut function, &constructors);
+        nested.apply_transformation(function);
+    }
     for function in &mut bubble.functions {
         elide_unpublished_owner_barriers(function);
         summarize_constant_reduction(function);
@@ -76,6 +96,108 @@ pub fn optimize_mir(
     }
     verify_mir_bubble(&bubble, arena)?;
     Ok(bubble)
+}
+
+fn collect_trivial_constructors(bubble: &MirBubble) -> BTreeMap<MethodId, TrivialConstructor> {
+    bubble
+        .methods
+        .iter()
+        .filter_map(|method| {
+            let [block] = method.function.blocks.as_slice() else {
+                return None;
+            };
+            let mut semantic = block.instructions.iter().filter(|instruction| {
+                !matches!(instruction.kind, MirInstructionKind::GcSafePoint { .. })
+            });
+            let construction = semantic.next()?;
+            if semantic.next().is_some() {
+                return None;
+            }
+            let MirInstructionKind::ClassMake {
+                class,
+                fields,
+                object_map,
+                ..
+            } = &construction.kind
+            else {
+                return None;
+            };
+            let MirTerminator::Return { values } = &block.terminator else {
+                return None;
+            };
+            if values.as_slice() != [construction.result] {
+                return None;
+            }
+            let parameters = block
+                .arguments
+                .iter()
+                .enumerate()
+                .map(|(index, argument)| (argument.value(), index))
+                .collect::<BTreeMap<_, _>>();
+            let fields = fields
+                .iter()
+                .map(|(field, value)| Some((*field, *parameters.get(value)?)))
+                .collect::<Option<Vec<_>>>()?;
+            Some((
+                method.method,
+                TrivialConstructor {
+                    class: *class,
+                    fields,
+                    object_map: object_map.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn inline_trivial_constructors(
+    function: &mut super::MirFunction,
+    constructors: &BTreeMap<MethodId, TrivialConstructor>,
+) {
+    let mut next_site = function
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| {
+            crate::verification::instruction_allocation_site(&instruction.kind)
+        })
+        .map(AllocationSiteId::raw)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    for block in &mut function.blocks {
+        for instruction in &mut block.instructions {
+            let MirInstructionKind::CallDirectMethod {
+                method, arguments, ..
+            } = &instruction.kind
+            else {
+                continue;
+            };
+            let Some(constructor) = constructors.get(method) else {
+                continue;
+            };
+            let Some(fields) = constructor
+                .fields
+                .iter()
+                .map(|(field, parameter)| {
+                    arguments
+                        .get(*parameter)
+                        .copied()
+                        .map(|value| (*field, value))
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            instruction.kind = MirInstructionKind::ClassMake {
+                class: constructor.class,
+                allocation_site: AllocationSiteId::from_raw(next_site),
+                fields,
+                object_map: constructor.object_map.clone(),
+            };
+            next_site = next_site.saturating_add(1);
+        }
+    }
 }
 
 fn elide_unpublished_owner_barriers(function: &mut super::MirFunction) {

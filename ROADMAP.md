@@ -260,9 +260,16 @@ Post-baseline library work has begun without widening the release foundation:
     without duplicate entry tokens. On the development host this reduced the
     checksum-validated `objectArray` median from about 408 ms to 34.223 ms in a
     50-sample run (Go: 4.896 ms); the immediately preceding retained-heap slice
-    measured about 38.0 ms. These are host-local optimization results;
-    direct page-backed payload access and inline conditional barriers remain
-    required before the production throughput gate can close.
+    measured about 38.0 ms. These are host-local optimization results. The
+    later physical-page and checked-direct-access slice is recorded below; the
+    production throughput gate remains separate.
+  - [x] Make monomorphic pages own contiguous one-word payloads, construct
+    initialized objects and arrays directly in their final page ranges, share
+    exact layouts per page, retain compact page/offset placement metadata, and
+    cache checked token spans for ordinary native array/field reads. Fresh
+    segmented-token insertion now uses its monotonic tail contract, relocation
+    invalidates retained direct views, and stable idle managed-array stores
+    avoid impossible major-barrier work without weakening SATB marking.
   - [x] Add opt-in persistent host workers with bounded owner-FIFO queues,
     opposite-end peer stealing, parallel exact object-map and collecting-safe-
     point remembered-card scans, deterministic result application, sweep
@@ -372,63 +379,114 @@ Post-baseline library work has begun without widening the release foundation:
     Same-binary A/B runs show about 2% improvement from one-pass initialization;
     safepoint allocation removal is neutral for zero-root churn and about 3%
     better for the retained-root workload under noisy 25-run host sampling.
-  - [ ] Reduce repeated native ABI locking/handle lookups for verified managed
+  - [x] Reduce repeated native ABI locking/handle lookups for verified managed
     array and field access. One-word precise payload slots, constant-time
     homogeneous-array classification, and token-derived segmented directory
     entries reduced the checksum-validated 50-sample retained-object median
     from about 38.0 ms to 34.223 ms (Go: 4.896 ms) on the development host.
-    Direct page-backed access and removal of the process-global common-path
-    mutex remain open; repeat both workloads and add production-collector
-    throughput/tail-latency gates once selectable.
+    Checked page-span hits now read array elements and object fields without the
+    process-global runtime mutex or another token-table lookup; a final
+    placement revision check rejects stale views. Initialized payloads are
+    constructed directly in their final page rather than copied through
+    temporary per-object storage. Against the corrected same-method HEAD
+    baseline, two independent pinned 50-sample candidate captures passed ADR
+    0099. A final exact-binary interleaved capture also passed: it measured
+    `allocationChurn` at 0.781 ms median, 1.167 ms P99, and 3,364 KiB peak RSS
+    against 0.746 ms, 2.709 ms, and 3,780 KiB, and `objectArray` at 32.011 ms
+    median, 33.963 ms P99, and 34,372 KiB against 30.800 ms, 32.481 ms, and
+    36,756 KiB. Later ADR 0101/0102 work removed the verified common-path lock,
+    and ADR 0103 now supplies the separately selected mutator-overlapped
+    production composition.
 
 #### Remaining heap problems
 
-- [ ] **Heap changes can optimize one workload while regressing another.**
-  `allocationChurn` and `objectArray` are not yet one mandatory performance
-  gate. Fix this by rejecting any heap change that regresses either 50-sample
-  median by more than 5%, breaks its checksum, or materially worsens P99 or
-  peak memory.
-- [ ] **Logical pages do not own physical object payloads.** Objects still keep
-  separate host allocations and duplicate object/placement metadata, so page
-  locality does not accelerate ordinary reads, writes, or scanning. Fix this
-  with monomorphic page-backed payloads, page-shared layouts, compact side
-  metadata, and token-derived placement.
-- [ ] **The native common path is globally serialized.** Allocation, array
-  access, field access, and barriers repeatedly lock the process-global runtime
-  and look up opaque tokens. Fix this with scheduler/thread-local active pages,
-  TLAB cursors, barrier buffers, and checked direct access; keep global work on
-  explicit refill, publication, safe-point, and collection slow paths.
-- [ ] **Allocation rebuilds layout information at runtime.** Pointer maps are
-  cloned, sorted, and searched even though the compiler already knows each
-  allocation layout. Fix this with compiler-emitted static layout and
-  allocation-site descriptors shared by allocation, access, barriers, and
-  tracing.
-- [ ] **Reference stores still pay too much barrier machinery.** The runtime
-  reaches generic SATB/generational logic for cases that can be classified
-  cheaply. Fix this with inline conditional barriers, per-mutator buffers,
-  range barriers, unpublished-initialization elision, and adaptive pretenuring
-  for allocation sites with sustained high survival.
-- [ ] **ABI 1 prevents native nursery relocation.** LLVM roots are published
-  but cannot be rewritten and reloaded across every control-flow path, forcing
-  native allocations into stable mature space. Fix this with ABI 2 writable
-  roots, forced-relocation tests, stale-token rejection, and verified reloads
-  for stacks, registers, coroutines, unwind paths, and FFI transitions.
-  ABI 2 native execution now forces token changes under LLVM `-O3` across
-  straight-line, divergent merge, and loop-backedge paths. Backend-private
-  root cells preserve the current token across control flow, lowering rejects
-  direct old-token operands, and negative mutations prove the conformance
-  runtime rejects stale uses. Exact ABI 2.0 load/link negotiation now fails
-  against the stable ABI 1 facade before normal entry. Unwind, coroutine, and
-  FFI transition proofs keep this item open.
-- [ ] **The production concurrent collector is not selectable.** Native
-  scheduler integration, concurrent mature work, card refinement, lazy sweep,
-  stack watermarks, bounded assists, and race/stress proof remain incomplete.
-  Fix all of them before reporting `ProductionConcurrentGenerational`.
-- [ ] **Retained-object throughput is still far from the target.** The current
-  local result is about 34 ms. Fix the page/access bottlenecks without a churn
-  regression, reach below 25 ms first and below 12 ms next, then compare Pop
-  against other runtimes only when P99, GC CPU, memory, and pause budgets also
-  pass.
+- [x] **Gate heap changes against both managed workloads.** ADR 0099 makes
+  `allocationChurn` and `objectArray` one atomic native performance gate. Every
+  warmup and timed execution validates its checksum; compatible 50-sample
+  baseline/candidate evidence rejects a median, nearest-rank P99, or peak-RSS
+  regression above 5%. The deterministic gate contract runs in PR CI, and the
+  pull-request evidence checklist applies it to heap/allocation/access/barrier
+  changes.
+- [x] **Make logical pages own physical object payloads without regressing the
+  paired heap gate.** The completed slice gives monomorphic pages contiguous
+  one-word payload storage, checked page-range views, relocation rebinding,
+  page-shared precise layouts, compact page/offset placement, and
+  scalar-equals-token precision tests. Initialized objects and arrays now write
+  their final values into the page before atomic publication, checked direct
+  reads retain the page but validate the placement revision before returning,
+  and minor relocation, evacuation, moves, and reclamation invalidate cached
+  spans. The repeat paired capture above passes checksum, median, nearest-rank
+  P99, and peak-RSS budgets for both workloads.
+- [x] **Remove global serialization from the native common path.** Checked
+  array/field reads use
+  thread-local direct page spans on a cache hit, and allocation uses
+  a bound thread-local stable-token TLAB after one cold-site observation.
+  Checked scalar array/field mutation
+  now writes page words outside that mutex, and scheduler-local mature
+  reference-array stores reuse checked owner and target spans while major
+  marking is idle. A writer-admission slot makes relocation, ownership changes,
+  reclamation, and major-cycle start wait for an admitted direct store; a
+  monotonic published-token watermark extends target validation only after
+  complete object publication. The allocation cursor, target validation, and
+  buffered reference-store capability share one thread-owned state, so the
+  verified adjacent allocation/store path performs one TLS access and no
+  process-global lock. Reference stores that need SATB, card, ownership, or
+  token validation retain the typed slow path. Refill, publication,
+  safe-point, and collection remain explicit serialized boundaries rather than
+  common-path work.
+- [x] **Reuse compiler-emitted allocation layouts at runtime.** ADR 0100 carries
+  stable allocation-site identities and exact layouts through verified MIR and
+  PLRI. Native ABI 1.20 introduced one-time validation and interning for each
+  immutable LLVM descriptor. Records, classes, record updates, tuples, unions,
+  `Result`/`Iteration`/typed-error cases, capture cells, and non-self-recursive
+  closure environments allocate atomically through that descriptor;
+  verifier coverage rejects identity collisions across an owning callable and
+  its nested functions. Later allocations reuse the page-shared layout, while
+  access and barriers use constant-time pointer membership and tracing retains
+  canonical ordered reference slots. ADR 0104 adds atomic self-recursive
+  closure construction, a closed atomic native-iteration result, and
+  constant-size homogeneous/strided formulas for arrays, interleaved tables,
+  and table-entry tuples. Fixed trusted runtime carriers use canonical scalar
+  or exact sparse maps; task frames retain compiler stack maps rather than
+  reconstructing object layouts.
+- [x] **Reduce reference-store barrier machinery without weakening
+  precision.** Idle stable mature-array stores use checked direct owner/target
+  capabilities outside the global runtime mutex; major-cycle start invalidates
+  them before marking. Marking uses bounded per-mutator SATB buffers,
+  post-scan shading, and versioned card refinement. Array fill uses one range
+  barrier that preserves every distinct overwritten SATB target. Atomic
+  unpublished initialization and verified MIR barrier proofs elide impossible
+  mutations, while exact-site survival telemetry enables deterministic
+  adaptive pretenuring only after sustained high survival.
+- [x] **Enable native nursery relocation only through ABI 2.** LLVM
+  backend-private root cells spill, rewrite, and reload exact tokens across
+  straight-line, divergent merge, loop-backedge, coroutine, C-unwind, and FFI
+  transitions under `-O3`; verification rejects any post-safe-point old-token
+  use and forced runtimes reject stale tokens. Exact load/link negotiation
+  rejects ABI 2 against the default stable facade. ADR 0103's separately built
+  production facade reports only ABI 2.0, relocates a scheduler-bound native
+  nursery root, restores its payload, and rejects the old physical token.
+- [x] **Make the production concurrent collector selectable.** ADR 0103's
+  explicit constructor and `production-generational` native build composition
+  report `ProductionConcurrentGenerational`; ordinary constructors and the
+  default ABI 1 archive retain lower stages. Immutable mature mark/sweep work
+  and versioned card refinement overlap mutator execution, while bounded
+  assists, lazy sweep, per-mutator SATB buffers, scheduler/task-root binding,
+  active-stack watermarks, deterministic result application, and repeated
+  overlap stress preserve exact reachability.
+- [x] **Reach the retained-object throughput target without a churn
+  regression.** Stable-token TLAB publication, compact page-span identities,
+  token-derived placement, constant-size homogeneous array maps, one-pass
+  filled-array classification, and verified ABI 1.21 adjacent-operation
+  fusion reduced `objectArray` below both the 25 ms and 12 ms development-host
+  targets. On declared P-core affinity 2, the final exact checksum-validated
+  50-sample captures measured `objectArray` medians of 11.151/11.290 ms, P99
+  values of 12.022/12.147 ms, and peak RSS of 12,848/12,836 KiB.
+  `allocationChurn` measured 1.467/1.471 ms, P99 values of 2.011/2.030 ms, and
+  peak RSS of 3,964/3,964 KiB. The atomic ADR 0099 gate passed. CPU affinity is
+  part of the closed host profile because this development host has distinct
+  performance and efficiency cores; these remain machine-local evidence, not
+  portable performance promises.
 
 - [ ] Prove representative programs behave the same through canonical MIR, the
   MIR interpreter, optimized MIR, and LLVM native execution.

@@ -4,8 +4,8 @@ use std::ffi::{CStr, c_char};
 
 use pop_runtime_collector::StableGenerationalRuntime;
 use pop_runtime_interface::{
-    AllocationClass, ArrayAllocationRequest, ArrayElementMap, ManagedReference, ObjectSlot,
-    RuntimeAdapter, RuntimeFailure, RuntimeTypeId,
+    ArrayAllocationRequest, ArrayElementMap, ManagedReference, ObjectSlot, RuntimeAdapter,
+    RuntimeFailure, RuntimeTypeId,
 };
 use pop_runtime_native_abi::StringFormatTag;
 
@@ -99,7 +99,7 @@ pub(crate) fn allocate_utf8_string(
         u32::try_from(bytes.len()).map_err(|_| RuntimeFailure::runtime_invariant())?;
     let request = ArrayAllocationRequest::new(
         RuntimeTypeId::new(1),
-        AllocationClass::Mature,
+        crate::allocation::native_default_allocation_class(),
         portable_length,
         ArrayElementMap::Scalar,
     );
@@ -142,7 +142,7 @@ pub fn allocate_process_arguments(arguments: &[&[u8]]) -> u64 {
     };
     let request = ArrayAllocationRequest::new(
         RuntimeTypeId::new(2),
-        AllocationClass::Mature,
+        crate::allocation::native_default_allocation_class(),
         length,
         ArrayElementMap::ManagedReference,
     );

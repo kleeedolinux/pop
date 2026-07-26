@@ -58,7 +58,9 @@ not runtime symbol selection. [ADR 0079](./decisions/0079-native-task-frame-and-
 adds the coexisting ABI 1.12 stable-token descriptor for compiler-created task
 frames and distinct cancellation source/token authority. A conforming 1.12
 facade continues to support 1.11, and neither descriptor may report ABI 2
-until the complete moving composition exists.
+until the complete moving composition exists. ADR 0103 supplies that
+composition as a separately built production archive; the default ABI 1
+archive remains unchanged.
 
 Under ADR 0070, ABI 1 native execution no longer uses `BootstrapRuntime`.
 Instead it composes the generational allocator and incremental SATB mature
@@ -347,18 +349,15 @@ mature-heap collection, concurrent marking, or SATB barrier; mature objects are
 retained. It is therefore test infrastructure for relocation correctness, not
 the selectable `ProductionGenerational` runtime profile.
 
-The collector also contains a later `GenerationalRuntime`
-conformance composition. It adds page-described TLAB placement, cooperative
-incremental SATB mature tracing/sweeping, protected emergency and evacuation
-reserves, typed non-heap memory accounting, adaptive growth targets, bounded
-allocation assists, deterministic byte-limit OOM, empty-page return, and
-domain/debt telemetry. It still reports the lower relocation contract because
-cooperative work is not concurrent production marking, the native backend does
-not yet provide writable relocating roots, and no profile may infer production
-capability from implementation experiments. ADR 0070 permits a closed native
-stable-token wrapper to use its mature allocator, SATB marking, and sweeping
-without exposing nursery relocation; this does not select the production
-profile.
+`GenerationalRuntime` retains a cooperative constructor that reports the lower
+relocation contract. ADR 0103 adds the separate explicit production
+constructor: immutable sequence-numbered mature work and versioned card
+refinement may remain in flight while the mutator runs, with bounded queues,
+assists, lazy sweeping, SATB buffers, and deterministic result application.
+Exact epoch publications install active-stack watermarks over canonical
+compiler root slots. The default ADR 0070 native composition remains stable
+ABI 1; the separately built production composition reports only ABI 2 and
+selects moving nursery allocation.
 
 The collector implementation consumes these contracts. It does not redefine
 them, and native exports remain a delegating facade over a concrete collector.
@@ -514,6 +513,45 @@ at the next reader event and is never a managed object pointer. Managed
 parser, descriptor pointer, registry key, runtime Item name, or variadic value
 crosses the runtime boundary. See
 [ADR 0096](./decisions/0096-generated-retained-metadata-adapters.md).
+
+ADR 0100 advances native ABI 1 to version 1.20 with
+`pop_rt_allocate_initialized_object_at_site`. New LLVM output emits one
+immutable private descriptor for each retained `AllocationSiteId` and passes
+only that descriptor plus the ordered initializer words. The runtime validates
+and interns the exact typed layout once, then allocation, checked access,
+barriers, and tracing share the monomorphic page descriptor. This is typed
+compiler/runtime metadata, not Pop reflection or string-based resolution. The
+legacy ABI 1.19 entry remains available for already-generated objects.
+
+ADR 0101 keeps that ABI spelling and adds the internal stable-token allocation
+fast path. An explicitly bound scheduler/mutator may hold one typed TLAB lease
+and append complete initialized objects to its private publication buffer
+without the process-global runtime mutex. Refill and every operation that can
+expose a token outside the local graph flush the buffer and TLAB top under
+checked runtime authority. Collector epoch acknowledgement is impossible until
+that flush completes. Unused reserved token entries remain invalid holes and
+are never reused.
+
+ADR 0102 advances native ABI 1 to version 1.21 with additive typed adapters for
+one verified adjacent initialized-object/managed-array-store pair and one
+verified adjacent checked-array-read/static-field-read pair. The LLVM plan may
+combine only the physical native transition: canonical MIR retains the
+separate operations and original evaluation, failure, safe-point, root,
+ownership, and barrier boundaries. Any extra use, intervening instruction or
+control-flow edge, scalar array, or missing static field proof retains the
+ordinary ABI calls.
+
+ADR 0104 advances native ABI 1 to version 1.22. One additive site entry
+atomically installs compiler-declared self-reference slots before publishing a
+cyclic object, and one closed iteration entry atomically constructs a native
+`Iteration<T>` result. Homogeneous and strided object-map formulas describe
+runtime-sized arrays and interleaved tables without per-element pointer maps.
+
+ADR 0103 keeps ABI 2.0 exact and makes its complete native facade selectable as
+a separate static build composition. That archive rejects ABI 1, uses the
+mutator-overlapped production collector, and rewrites exact writable roots
+before managed execution resumes. The default archive continues to reject ABI
+2 and cannot move native tokens.
 
 The compact nonzero `FfiAbiLayoutId` used by FFI buffer and foreign-call
 operations is the first eight big-endian bytes of ADR 0086's full canonical

@@ -2,10 +2,10 @@ use std::collections::BTreeSet;
 
 use super::*;
 use pop_foundation::{
-    BindingId, BubbleId, BuiltinTypeId, CaptureId, ClassId, FieldId, FileId, FunctionId,
-    InterfaceId, InterfaceMethodId, IterationCaseId, IterationProtocolMethodId, LocalId, MethodId,
-    ModuleId, NamespaceId, NestedFunctionId, ParameterId, SourceSpan, SymbolId, SymbolIdentity,
-    TextRange, TextSize, TypeId, UnionCaseId, ValueParameterId,
+    AllocationSiteId, BindingId, BubbleId, BuiltinTypeId, CaptureId, ClassId, FieldId, FileId,
+    FunctionId, InterfaceId, InterfaceMethodId, IterationCaseId, IterationProtocolMethodId,
+    LocalId, MethodId, ModuleId, NamespaceId, NestedFunctionId, ParameterId, SourceSpan, SymbolId,
+    SymbolIdentity, TextRange, TextSize, TypeId, UnionCaseId, ValueParameterId,
 };
 use pop_resolve::Visibility;
 use pop_types::{
@@ -820,6 +820,7 @@ fn bubble_verifier_checks_declaration_field_and_union_case_schema() {
                 kind: HirStatementKind::Expression(HirExpression {
                     kind: HirExpressionKind::Record {
                         record: SymbolId::from_raw(10),
+                        allocation_site: AllocationSiteId::from_raw(0),
                         fields: Vec::new(),
                     },
                     type_id: record_type,

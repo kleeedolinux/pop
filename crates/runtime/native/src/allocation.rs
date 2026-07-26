@@ -1,12 +1,47 @@
 //! Native managed allocation exports.
 
+mod initialized;
+mod site;
+
 use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, ArrayElementMap, ManagedReference,
-    ObjectAllocationRequest, ObjectMap, ObjectSlot, RuntimeAdapter, RuntimeTypeId,
-    TableAllocationRequest,
+    ObjectAllocationRequest, ObjectMap, RuntimeAdapter, RuntimeTypeId, TableAllocationRequest,
 };
 
 use crate::state::{TableMetadata, abi_tables, lock_abi_runtime};
+
+#[must_use]
+pub(crate) const fn native_default_allocation_class() -> AllocationClass {
+    if cfg!(feature = "production-generational") {
+        AllocationClass::NurseryEligible
+    } else {
+        AllocationClass::Mature
+    }
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn native_allocation_class(reference: u64) -> Option<AllocationClass> {
+    lock_abi_runtime()
+        .ok()?
+        .allocation_class(ManagedReference::new(reference))
+}
+
+pub use initialized::{
+    allocate_mapped_object, pop_rt_allocate_initialized_object,
+    pop_rt_allocate_initialized_object_at_site_and_store_array, pop_rt_allocate_mapped_object,
+};
+pub(crate) use site::flush_thread_local_allocations;
+pub use site::{
+    allocation_site_descriptor_count, allocation_site_global_lookup_count,
+    allocation_site_tlab_refill_count, pop_rt_allocate_initialized_object_at_site,
+    pop_rt_allocate_initialized_self_referential_object_at_site,
+};
+pub(crate) use site::{
+    cached_direct_reference_store, cached_direct_reference_store_contains,
+    quiesce_direct_reference_store, seed_direct_array_reference_store,
+    seed_direct_reference_validation,
+};
 
 /// Allocates a scalar array and returns its opaque managed handle, or zero on
 /// a typed runtime failure.
@@ -18,7 +53,7 @@ pub extern "C" fn pop_rt_allocate_array(length: u64, managed: u8) -> u64 {
     };
     let request = ArrayAllocationRequest::new(
         RuntimeTypeId::new(0),
-        AllocationClass::Mature,
+        native_default_allocation_class(),
         length,
         if managed == 0 {
             ArrayElementMap::Scalar
@@ -29,9 +64,17 @@ pub extern "C" fn pop_rt_allocate_array(length: u64, managed: u8) -> u64 {
     let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
-    runtime
+    let reference = runtime
         .allocate_array(&request)
-        .map_or(0, ManagedReference::raw)
+        .map_or(0, ManagedReference::raw);
+    if managed != 0
+        && reference != 0
+        && let Some(store) =
+            runtime.direct_array_reference_store_access(ManagedReference::new(reference))
+    {
+        crate::storage::seed_direct_array_reference_store(store);
+    }
+    reference
 }
 
 /// Allocates one fixed array and initializes every element before publication.
@@ -47,7 +90,7 @@ pub extern "C" fn pop_rt_allocate_array_filled(
     };
     let request = ArrayAllocationRequest::new(
         RuntimeTypeId::new(0),
-        AllocationClass::Mature,
+        native_default_allocation_class(),
         length,
         if managed == 0 {
             ArrayElementMap::Scalar
@@ -58,9 +101,17 @@ pub extern "C" fn pop_rt_allocate_array_filled(
     let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
-    runtime
+    let reference = runtime
         .allocate_array_filled(&request, initial_value)
-        .map_or(0, ManagedReference::raw)
+        .map_or(0, ManagedReference::raw);
+    if managed != 0
+        && reference != 0
+        && let Some(store) =
+            runtime.direct_array_reference_store_access(ManagedReference::new(reference))
+    {
+        crate::storage::seed_direct_array_reference_store(store);
+    }
+    reference
 }
 
 #[allow(unsafe_code)]
@@ -72,129 +123,13 @@ pub extern "C" fn pop_rt_allocate_object(slot_count: u64) -> u64 {
     abi_allocate_object(slot_count)
 }
 
-/// Allocates an object using explicit zero-based managed-reference slots.
-#[must_use]
-pub fn allocate_mapped_object(slot_count: u64, reference_slots: &[u32]) -> u64 {
-    let Ok(slot_count) = u32::try_from(slot_count) else {
-        return 0;
-    };
-    let object_map = if reference_slots.is_empty() {
-        ObjectMap::scalar(slot_count)
-    } else {
-        let slots = reference_slots
-            .iter()
-            .copied()
-            .map(ObjectSlot::new)
-            .collect();
-        let Ok(object_map) = ObjectMap::new(slot_count, slots) else {
-            return 0;
-        };
-        object_map
-    };
-    let request =
-        ObjectAllocationRequest::new(RuntimeTypeId::new(0), AllocationClass::Mature, object_map);
-    let Ok(mut runtime) = lock_abi_runtime() else {
-        return 0;
-    };
-    runtime
-        .allocate_object(&request)
-        .map_or(0, ManagedReference::raw)
-}
-
-/// C-compatible mapped-object allocation boundary used by native LLVM code.
-///
-/// # Safety
-///
-/// When `reference_count` is nonzero, `reference_slots` must address that many
-/// readable `u32` slot indices for the duration of this call.
-#[allow(unsafe_code)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn pop_rt_allocate_mapped_object(
-    slot_count: u64,
-    reference_slots: *const u32,
-    reference_count: u64,
-) -> u64 {
-    let Ok(reference_count) = usize::try_from(reference_count) else {
-        return 0;
-    };
-    if reference_count == 0 {
-        return allocate_mapped_object(slot_count, &[]);
-    }
-    if reference_slots.is_null() {
-        return 0;
-    }
-    // SAFETY: The backend passes a stack array containing exactly the declared
-    // number of immutable slot indices.
-    let reference_slots = unsafe { std::slice::from_raw_parts(reference_slots, reference_count) };
-    allocate_mapped_object(slot_count, reference_slots)
-}
-
-/// Allocates and publishes one object with its complete precisely mapped
-/// payload.
-///
-/// # Safety
-///
-/// Nonzero counts require readable arrays of exactly the corresponding length.
-/// Initial values use the physical slot representation selected by LLVM.
-#[allow(unsafe_code)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn pop_rt_allocate_initialized_object(
-    slot_count: u64,
-    reference_slots: *const u32,
-    reference_count: u64,
-    initial_values: *const u64,
-    value_count: u64,
-) -> u64 {
-    let Ok(slot_count) = u32::try_from(slot_count) else {
-        return 0;
-    };
-    let Ok(reference_count) = usize::try_from(reference_count) else {
-        return 0;
-    };
-    let Ok(value_count) = usize::try_from(value_count) else {
-        return 0;
-    };
-    if value_count != slot_count as usize
-        || (reference_count != 0 && reference_slots.is_null())
-        || (value_count != 0 && initial_values.is_null())
-    {
-        return 0;
-    }
-    let references = if reference_count == 0 {
-        &[]
-    } else {
-        // SAFETY: The caller contract requires this exact readable array.
-        unsafe { std::slice::from_raw_parts(reference_slots, reference_count) }
-    };
-    let values = if value_count == 0 {
-        &[]
-    } else {
-        // SAFETY: The caller contract requires this exact readable array.
-        unsafe { std::slice::from_raw_parts(initial_values, value_count) }
-    };
-    let object_map = if references.is_empty() {
-        ObjectMap::scalar(slot_count)
-    } else {
-        let slots = references.iter().copied().map(ObjectSlot::new).collect();
-        let Ok(object_map) = ObjectMap::new(slot_count, slots) else {
-            return 0;
-        };
-        object_map
-    };
-    let request =
-        ObjectAllocationRequest::new(RuntimeTypeId::new(0), AllocationClass::Mature, object_map);
-    let Ok(mut runtime) = lock_abi_runtime() else {
-        return 0;
-    };
-    runtime
-        .allocate_object_initialized(&request, values)
-        .map_or(0, ManagedReference::raw)
-}
-
 fn abi_allocate_object(slot_count: u32) -> u64 {
     let object_map = ObjectMap::scalar(slot_count);
-    let request =
-        ObjectAllocationRequest::new(RuntimeTypeId::new(0), AllocationClass::Mature, object_map);
+    let request = ObjectAllocationRequest::new(
+        RuntimeTypeId::new(0),
+        native_default_allocation_class(),
+        object_map,
+    );
     let Ok(mut runtime) = lock_abi_runtime() else {
         return 0;
     };
@@ -217,7 +152,7 @@ pub extern "C" fn pop_rt_allocate_table(
     };
     let Ok(request) = TableAllocationRequest::new(
         RuntimeTypeId::new(0),
-        AllocationClass::Mature,
+        native_default_allocation_class(),
         entry_count,
         if managed_keys == 0 {
             ArrayElementMap::Scalar

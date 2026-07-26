@@ -95,7 +95,7 @@ impl<'resolver, 'index> BodyChecker<'resolver, 'index> {
                                         typed.span(),
                                         format!("{kind:?}.View"),
                                         "LocalOwnerReturn",
-                                    ))
+                                    ));
                             }
                             None => self.diagnostics.push(
                                 type_diagnostics::invalid_view_callable_provenance(

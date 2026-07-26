@@ -318,7 +318,8 @@ impl GenerationalRuntime {
             self.selected_evacuation_objects(&selected_regions, expected_objects)?;
         let (relocations, next_reference, bytes_copied) =
             self.plan_relocation_tokens(&selected_objects)?;
-        let (next_objects, object_fields_updated, worker_objects_processed) =
+        self.allocation.invalidate_all_direct_accesses();
+        let (mut next_objects, object_fields_updated, worker_objects_processed) =
             self.relocate_objects(&relocations)?;
 
         let (next_roots, strong_handles_updated) =
@@ -331,6 +332,7 @@ impl GenerationalRuntime {
         let mut next_allocation = self.allocation.clone();
         let peak_committed =
             next_allocation.reconcile_after_evacuation(&relocations, &next_objects)?;
+        next_allocation.bind_all_payloads(&mut next_objects)?;
         if !self.memory.admits_evacuation(peak_committed) {
             self.memory.record_out_of_memory();
             return Err(BootstrapRuntime::out_of_memory(0, bytes_copied));
@@ -546,12 +548,11 @@ impl GenerationalRuntime {
             }
         }
         for object in self.nursery.objects.values() {
-            for slot in object.allocation.object_map.reference_slots() {
+            for slot in object.allocation.object_map.iter_reference_slots() {
                 let value = object
                     .allocation
                     .slots
                     .get(slot.raw() as usize)
-                    .copied()
                     .ok_or_else(RuntimeFailure::runtime_invariant)?;
                 if value
                     .as_reference()
@@ -590,12 +591,21 @@ fn rewrite_object_references(
     relocations: &BTreeMap<ManagedReference, ManagedReference>,
 ) -> usize {
     let mut updated = 0usize;
-    for slot in object.allocation.object_map.reference_slots() {
-        let value = &mut object.allocation.slots[slot.raw() as usize];
+    for slot in object.allocation.object_map.iter_reference_slots() {
+        let index = slot.raw() as usize;
+        let value = object
+            .allocation
+            .slots
+            .get(index)
+            .expect("verified object slot");
         if let Some(reference) = value.as_reference()
             && let Some(destination) = relocations.get(&reference)
         {
-            *value = SlotValue::reference(Some(*destination));
+            let changed = object
+                .allocation
+                .slots
+                .set(index, SlotValue::reference(Some(*destination)));
+            debug_assert!(changed);
             updated = updated.saturating_add(1);
         }
     }

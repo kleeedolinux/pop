@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use pop_runtime_interface::{
-    AllocationClass, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot, RootHandle,
-    RuntimeAdapter, RuntimeTypeId,
+    ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot, RootHandle, RuntimeAdapter,
+    RuntimeTypeId,
 };
 
 use crate::state::lock_abi_runtime;
@@ -220,7 +220,7 @@ pub unsafe extern "C" fn pop_rt_ffi_buffer_open(
     };
     let request = ObjectAllocationRequest::new(
         BUFFER_RUNTIME_TYPE,
-        AllocationClass::Mature,
+        crate::allocation::native_default_allocation_class(),
         ObjectMap::scalar(BUFFER_SLOT_COUNT),
     );
     let values = [

@@ -7,7 +7,9 @@ use pop_runtime_interface::{
 use crate::{heap::SlotValue, relocation::CollectorGeneration};
 
 use super::allocation::RegionState;
-use super::heap::{GenerationalRuntime, LargeObjectScanChunk, MajorCyclePhase};
+use super::heap::{
+    GenerationalRuntime, LargeObjectScanChunk, MajorCyclePhase, PendingBackgroundWork,
+};
 use super::workers::{MarkTask, scan_slots};
 
 #[derive(Clone, Copy)]
@@ -48,6 +50,7 @@ impl GenerationalRuntime {
         mut pending: Vec<ManagedReference>,
     ) -> Result<(), RuntimeFailure> {
         self.validate_major_references(&pending)?;
+        self.allocation.invalidate_all_direct_accesses();
         pending.extend(self.nursery.roots.values().copied());
         pending.extend(self.nursery.pins.values().copied());
         self.major.reset();
@@ -71,9 +74,23 @@ impl GenerationalRuntime {
         let mut remaining = work_budget;
         let mut completed_work = 0;
         while remaining > 0 {
+            self.complete_pending_background_work()?;
             match self.major.phase {
                 MajorCyclePhase::Idle => return Ok((None, completed_work)),
                 MajorCyclePhase::Marking => {
+                    if self.production_concurrent && self.workers.is_some() {
+                        let (work, dispatched) = self.dispatch_concurrent_mark(remaining)?;
+                        if work == 0 {
+                            self.prepare_sweep();
+                        } else {
+                            completed_work += work;
+                            if dispatched {
+                                return Ok((None, completed_work));
+                            }
+                            remaining -= work;
+                        }
+                        continue;
+                    }
                     if self.workers.is_some() {
                         let work = self.advance_background_mark(remaining)?;
                         if work == 0 {
@@ -100,6 +117,18 @@ impl GenerationalRuntime {
                     }
                 }
                 MajorCyclePhase::Sweeping => {
+                    if self.production_concurrent && self.workers.is_some() {
+                        let (work, dispatched) = self.dispatch_concurrent_sweep(remaining)?;
+                        if work == 0 {
+                            return Ok((Some(self.finish_major()), completed_work));
+                        }
+                        completed_work += work;
+                        if dispatched {
+                            return Ok((None, completed_work));
+                        }
+                        remaining -= work;
+                        continue;
+                    }
                     if self.workers.is_some() {
                         let work = self.advance_background_sweep(remaining)?;
                         if work == 0 {
@@ -126,6 +155,97 @@ impl GenerationalRuntime {
             return Ok((Some(self.finish_major()), completed_work));
         }
         Ok((None, completed_work))
+    }
+
+    fn complete_pending_background_work(&mut self) -> Result<(), RuntimeFailure> {
+        let Some(pending) = self.pending_background_work.take() else {
+            return Ok(());
+        };
+        match pending {
+            PendingBackgroundWork::Mark(count) => {
+                let results = self
+                    .workers
+                    .as_mut()
+                    .ok_or_else(RuntimeFailure::runtime_invariant)?
+                    .complete_mark(count)?;
+                for result in results {
+                    self.apply_mark_result(
+                        result.reference,
+                        result.children,
+                        result.large_object_scan_chunk,
+                    )?;
+                }
+            }
+            PendingBackgroundWork::Sweep(count) => {
+                let swept = self
+                    .workers
+                    .as_mut()
+                    .ok_or_else(RuntimeFailure::runtime_invariant)?
+                    .complete_sweep(count)?;
+                for reference in swept {
+                    if self.nursery.objects.remove(&reference).is_some() {
+                        self.major.reclaimed = self.major.reclaimed.saturating_add(1);
+                    }
+                    self.allocation.remove_without_page_reclamation(reference);
+                    self.nursery.dirty_cards.remove(&reference);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn dispatch_concurrent_mark(
+        &mut self,
+        work_budget: usize,
+    ) -> Result<(usize, bool), RuntimeFailure> {
+        let mut tasks = Vec::new();
+        let mut completed_work = 0;
+        while completed_work < work_budget {
+            let Some(work) = self.next_mark_work() else {
+                break;
+            };
+            completed_work += 1;
+            if let Some(task) = self.prepare_mark_task(work)? {
+                tasks.push(task);
+            }
+        }
+        if tasks.is_empty() {
+            return Ok((completed_work, false));
+        }
+        let count = self
+            .workers
+            .as_mut()
+            .ok_or_else(RuntimeFailure::runtime_invariant)?
+            .submit_mark(tasks)?;
+        self.pending_background_work = Some(PendingBackgroundWork::Mark(count));
+        Ok((completed_work, true))
+    }
+
+    fn dispatch_concurrent_sweep(
+        &mut self,
+        work_budget: usize,
+    ) -> Result<(usize, bool), RuntimeFailure> {
+        let mut references = Vec::new();
+        let mut completed_work = 0;
+        while completed_work < work_budget {
+            let Some((reference, reclaim)) = self.next_sweep_entry() else {
+                break;
+            };
+            completed_work += 1;
+            if reclaim {
+                references.push(reference);
+            }
+        }
+        if references.is_empty() {
+            return Ok((completed_work, false));
+        }
+        let count = self
+            .workers
+            .as_mut()
+            .ok_or_else(RuntimeFailure::runtime_invariant)?
+            .submit_sweep(references)?;
+        self.pending_background_work = Some(PendingBackgroundWork::Sweep(count));
+        Ok((completed_work, true))
     }
 
     fn advance_background_mark(&mut self, work_budget: usize) -> Result<usize, RuntimeFailure> {
@@ -159,6 +279,7 @@ impl GenerationalRuntime {
     }
 
     fn next_mark_work(&mut self) -> Option<MarkWork> {
+        self.drain_mutator_barrier_buffers();
         if let Some(reference) = self.major.satb.pop() {
             return Some(MarkWork::Discover(reference));
         }
@@ -208,7 +329,7 @@ impl GenerationalRuntime {
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
         let generation = object.generation;
         let class = object.allocation.class;
-        let reference_slot_count = object.allocation.object_map.reference_slots().len();
+        let reference_slot_count = object.allocation.object_map.reference_slot_count();
         if generation == CollectorGeneration::Mature {
             self.major.marked_mature.insert(reference);
         }
@@ -262,7 +383,7 @@ impl GenerationalRuntime {
             .objects
             .get(&reference)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        let reference_slot_count = object.allocation.object_map.reference_slots().len();
+        let reference_slot_count = object.allocation.object_map.reference_slot_count();
         self.major.pending.extend(children);
         if let Some(chunk) = large_object_scan_chunk {
             self.major_telemetry
@@ -297,19 +418,22 @@ impl GenerationalRuntime {
             .objects
             .get(&reference)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        let reference_slots = object
+        let count = end
+            .checked_sub(start)
+            .filter(|_| end <= object.allocation.object_map.reference_slot_count())
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        let mut slots = Vec::with_capacity(count);
+        for slot in object
             .allocation
             .object_map
-            .reference_slots()
-            .get(start..end)
-            .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        let mut slots = Vec::with_capacity(reference_slots.len());
-        for slot in reference_slots {
+            .iter_reference_slots()
+            .skip(start)
+            .take(count)
+        {
             let value = object
                 .allocation
                 .slots
                 .get(slot.raw() as usize)
-                .copied()
                 .ok_or_else(RuntimeFailure::runtime_invariant)?;
             slots.push(value);
         }

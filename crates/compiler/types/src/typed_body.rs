@@ -420,6 +420,7 @@ pub enum TypedExpressionKind {
     ClassConstruct {
         class: ClassId,
         definition: SymbolId,
+        allocation_site: pop_foundation::AllocationSiteId,
         fields: Vec<TypedFieldValue>,
     },
     ArrayGet {
@@ -474,6 +475,7 @@ pub enum TypedExpressionKind {
     },
     Record {
         record: SymbolId,
+        allocation_site: pop_foundation::AllocationSiteId,
         fields: Vec<TypedFieldValue>,
     },
     RecordUpdate {

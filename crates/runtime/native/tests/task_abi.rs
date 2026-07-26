@@ -131,6 +131,7 @@ fn cold_task_frame_retains_its_precise_managed_captures() {
 
     assert!(request_abi_collection());
     assert_eq!(abi_safe_point(33, &[task]), 1);
+    assert_eq!(pop_rt_task_start_direct(task, 0), 1);
     let mut observed = 0;
     assert_eq!(
         unsafe { pop_rt_task_await(task, &raw mut observed) },

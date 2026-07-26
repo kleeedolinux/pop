@@ -10,12 +10,14 @@ use pop_runtime_interface::{
 use super::heap::GenerationalRuntime;
 use super::task_roots::{TaskFrameRootConfig, TaskFrameRootError, TaskFrameRootTelemetry};
 use super::{
-    EpochCoordinatorError, EpochCoordinatorTelemetry, EpochProgress, MajorCollectionHandshakeError,
-    MutatorExecutionState, MutatorId,
+    BackgroundWorkerConfig, BackgroundWorkerStartError, EpochCoordinatorError,
+    EpochCoordinatorTelemetry, EpochProgress, MajorCollectionHandshakeError, MutatorExecutionState,
+    MutatorId,
 };
 
 pub struct StableGenerationalRuntime {
     inner: GenerationalRuntime,
+    stable_tokens: bool,
 }
 
 impl StableGenerationalRuntime {
@@ -23,6 +25,7 @@ impl StableGenerationalRuntime {
     pub fn new() -> Self {
         Self {
             inner: GenerationalRuntime::new(),
+            stable_tokens: true,
         }
     }
 
@@ -30,7 +33,23 @@ impl StableGenerationalRuntime {
     pub fn with_task_frame_root_config(config: TaskFrameRootConfig) -> Self {
         Self {
             inner: GenerationalRuntime::with_task_frame_root_config(config),
+            stable_tokens: true,
         }
+    }
+
+    /// Creates the statically selected moving production composition.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed startup failure when the bounded collector worker pool
+    /// cannot be created.
+    pub fn production_with_background_workers(
+        workers: BackgroundWorkerConfig,
+    ) -> Result<Self, BackgroundWorkerStartError> {
+        Ok(Self {
+            inner: GenerationalRuntime::production_with_background_workers(workers)?,
+            stable_tokens: false,
+        })
     }
 
     /// Selects the logical scheduler for the next serialized native operation.
@@ -226,8 +245,13 @@ impl StableGenerationalRuntime {
         self.inner.request_major_collection();
     }
 
+    /// Requests one moving-nursery cycle for ABI 2 relocation proof.
+    pub fn request_relocation(&mut self) {
+        self.inner.request_minor_collection();
+    }
+
     #[must_use]
-    pub const fn collection_requested(&self) -> bool {
+    pub fn collection_requested(&self) -> bool {
         self.inner.collection_requested()
     }
 
@@ -275,6 +299,81 @@ impl StableGenerationalRuntime {
         self.inner.array_length(reference)
     }
 
+    #[must_use]
+    pub fn direct_object_page_access(
+        &self,
+        reference: ManagedReference,
+    ) -> Option<super::DirectPageAccess> {
+        self.inner.direct_object_page_access(reference)
+    }
+
+    #[must_use]
+    pub fn direct_array_page_access(
+        &self,
+        reference: ManagedReference,
+    ) -> Option<super::DirectPageAccess> {
+        self.inner.direct_array_page_access(reference)
+    }
+
+    #[must_use]
+    pub fn direct_array_reference_store_access(
+        &self,
+        reference: ManagedReference,
+    ) -> Option<super::DirectReferenceStoreAccess> {
+        self.inner.direct_array_reference_store_access(reference)
+    }
+
+    #[must_use]
+    pub fn direct_reference_validation(
+        &self,
+        reference: ManagedReference,
+    ) -> Option<super::DirectReferenceValidation> {
+        self.inner.direct_reference_validation(reference)
+    }
+
+    /// Reserves one bounded pointer-free stable-token allocation lease.
+    ///
+    /// # Errors
+    ///
+    /// Forwards typed layout, token, and memory-admission failures.
+    pub fn reserve_pointer_free_mature_objects(
+        &mut self,
+        request: &ObjectAllocationRequest,
+        count: usize,
+    ) -> Result<super::ReservedMatureLease, RuntimeFailure> {
+        let stable = request.with_allocation_class(AllocationClass::Mature);
+        self.inner
+            .reserve_pointer_free_mature_objects(&stable, count)
+    }
+
+    /// Publishes complete records consumed from one bound allocation lease.
+    ///
+    /// # Errors
+    ///
+    /// Forwards binding, reservation, and duplicate-token failures.
+    pub fn publish_reserved_mature_objects(
+        &mut self,
+        pending: Vec<super::PendingMatureObject>,
+    ) -> Result<(), RuntimeFailure> {
+        self.inner.publish_reserved_mature_objects(pending)
+    }
+
+    /// Flushes one complete stable-token lease and cancels its unused tail.
+    ///
+    /// # Errors
+    ///
+    /// Forwards page-range, binding, reservation, and publication failures.
+    pub fn publish_reserved_mature_lease(
+        &mut self,
+        lease: super::ReservedMatureLease,
+    ) -> Result<(), RuntimeFailure> {
+        self.inner.publish_reserved_mature_lease(lease)
+    }
+
+    pub fn cancel_reserved_objects(&mut self, references: Vec<ManagedReference>) {
+        self.inner.cancel_reserved_objects(references);
+    }
+
     /// Allocates and initializes one stable-token array.
     ///
     /// # Errors
@@ -287,7 +386,7 @@ impl StableGenerationalRuntime {
     ) -> Result<ManagedReference, RuntimeFailure> {
         let stable = ArrayAllocationRequest::new(
             request.type_id(),
-            Self::stable_class(request.allocation_class()),
+            self.selected_class(request.allocation_class()),
             request.length(),
             request.element_map(),
         );
@@ -304,17 +403,31 @@ impl StableGenerationalRuntime {
         request: &ObjectAllocationRequest,
         values: &[u64],
     ) -> Result<ManagedReference, RuntimeFailure> {
-        if request.allocation_class() == Self::stable_class(request.allocation_class()) {
+        if request.allocation_class() == self.selected_class(request.allocation_class()) {
             return self.inner.allocate_object_initialized(request, values);
         }
         self.inner.allocate_object_initialized(
-            &ObjectAllocationRequest::new(
-                request.type_id(),
-                Self::stable_class(request.allocation_class()),
-                request.object_map().clone(),
-            ),
+            &request.with_allocation_class(self.selected_class(request.allocation_class())),
             values,
         )
+    }
+
+    /// Allocates one stable-token object whose selected reference slots point
+    /// at the object itself before its token becomes observable.
+    ///
+    /// # Errors
+    ///
+    /// Forwards typed layout, initializer, self-slot, and memory-admission
+    /// failures.
+    pub fn allocate_object_initialized_self_referential(
+        &mut self,
+        request: &ObjectAllocationRequest,
+        values: &[u64],
+        self_slots: &[ObjectSlot],
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        let stable = request.with_allocation_class(self.selected_class(request.allocation_class()));
+        self.inner
+            .allocate_object_initialized_self_referential(&stable, values, self_slots)
     }
 
     /// # Errors
@@ -349,7 +462,11 @@ impl StableGenerationalRuntime {
         slot: ObjectSlot,
         value: u64,
     ) -> Result<(), RuntimeFailure> {
-        self.inner.store_stable_array_value(owner, slot, value)
+        if self.stable_tokens {
+            self.inner.store_stable_array_value(owner, slot, value)
+        } else {
+            self.inner.store_array_value(owner, slot, value)
+        }
     }
 
     /// # Errors
@@ -361,7 +478,11 @@ impl StableGenerationalRuntime {
         slot: ObjectSlot,
         value: u64,
     ) -> Result<(), RuntimeFailure> {
-        self.inner.store_stable_slot_value(owner, slot, value)
+        if self.stable_tokens {
+            self.inner.store_stable_slot_value(owner, slot, value)
+        } else {
+            self.inner.store_slot_value(owner, slot, value)
+        }
     }
 
     /// # Errors
@@ -417,32 +538,40 @@ impl StableGenerationalRuntime {
             .grow_table(owner, old_capacity, new_capacity, key_map, value_map)
     }
 
-    const fn stable_class(class: AllocationClass) -> AllocationClass {
-        match class {
-            AllocationClass::NurseryEligible | AllocationClass::Mature => AllocationClass::Mature,
-            AllocationClass::Large => AllocationClass::Large,
-            AllocationClass::Pinned => AllocationClass::Pinned,
+    const fn selected_class(&self, class: AllocationClass) -> AllocationClass {
+        if self.stable_tokens {
+            match class {
+                AllocationClass::NurseryEligible | AllocationClass::Mature => {
+                    AllocationClass::Mature
+                }
+                AllocationClass::Large => AllocationClass::Large,
+                AllocationClass::Pinned => AllocationClass::Pinned,
+            }
+        } else {
+            class
         }
     }
 }
 
 impl RuntimeAdapter for StableGenerationalRuntime {
     fn contract(&self) -> GarbageCollectorContract {
-        GarbageCollectorContract::native_stable_generational()
+        if self.stable_tokens {
+            GarbageCollectorContract::native_stable_generational()
+        } else {
+            self.inner.contract()
+        }
     }
 
     fn allocate_object(
         &mut self,
         request: &ObjectAllocationRequest,
     ) -> Result<ManagedReference, RuntimeFailure> {
-        if request.allocation_class() == Self::stable_class(request.allocation_class()) {
+        if request.allocation_class() == self.selected_class(request.allocation_class()) {
             return self.inner.allocate_object(request);
         }
-        self.inner.allocate_object(&ObjectAllocationRequest::new(
-            request.type_id(),
-            Self::stable_class(request.allocation_class()),
-            request.object_map().clone(),
-        ))
+        self.inner.allocate_object(
+            &request.with_allocation_class(self.selected_class(request.allocation_class())),
+        )
     }
 
     fn allocate_array(
@@ -451,7 +580,7 @@ impl RuntimeAdapter for StableGenerationalRuntime {
     ) -> Result<ManagedReference, RuntimeFailure> {
         self.inner.allocate_array(&ArrayAllocationRequest::new(
             request.type_id(),
-            Self::stable_class(request.allocation_class()),
+            self.selected_class(request.allocation_class()),
             request.length(),
             request.element_map(),
         ))
@@ -463,7 +592,7 @@ impl RuntimeAdapter for StableGenerationalRuntime {
     ) -> Result<ManagedReference, RuntimeFailure> {
         let stable = TableAllocationRequest::new(
             request.type_id(),
-            Self::stable_class(request.allocation_class()),
+            self.selected_class(request.allocation_class()),
             request.entry_count(),
             request.key_map(),
             request.value_map(),
@@ -476,8 +605,10 @@ impl RuntimeAdapter for StableGenerationalRuntime {
         &mut self,
         bytes: &[u8],
     ) -> Result<ManagedReference, RuntimeFailure> {
-        self.inner
-            .allocate_immutable_bytes_with_class(bytes, AllocationClass::Mature)
+        self.inner.allocate_immutable_bytes_with_class(
+            bytes,
+            self.selected_class(AllocationClass::NurseryEligible),
+        )
     }
 
     fn immutable_bytes_length(&self, bytes: ManagedReference) -> Result<u64, RuntimeFailure> {

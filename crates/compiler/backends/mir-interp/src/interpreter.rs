@@ -2893,7 +2893,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                     },
                 }
             }
-            MirInstructionKind::TupleMake(elements) => {
+            MirInstructionKind::TupleMake { elements, .. } => {
                 let tuple = MirValue::Tuple(
                     elements
                         .iter()
@@ -4540,7 +4540,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 }
                 Ok(closure)
             }
-            MirInstructionKind::RecordMake { record, fields } => {
+            MirInstructionKind::RecordMake { record, fields, .. } => {
                 Ok(RuntimeValue::visible(MirValue::Record {
                     record: *record,
                     fields: evaluate_visible_fields(fields, values)?,
@@ -4550,6 +4550,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 class,
                 fields,
                 object_map,
+                ..
             } => {
                 let definition = canonical_class_identity(
                     self.mir,
@@ -4580,6 +4581,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 record,
                 base,
                 fields,
+                ..
             } => update_record(*record, *base, fields, values),
             MirInstructionKind::FieldGet { base, field } => get_field(*base, *field, values),
             MirInstructionKind::FieldSet {
@@ -4591,6 +4593,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 union,
                 case,
                 arguments,
+                ..
             } => Ok(RuntimeValue::visible(MirValue::Union {
                 union: *union,
                 case: *case,
@@ -4603,6 +4606,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 result,
                 case,
                 arguments,
+                ..
             } => Ok(RuntimeValue::visible(MirValue::Result {
                 definition: *result,
                 case: *case,
@@ -4615,6 +4619,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 iteration,
                 case,
                 arguments,
+                ..
             } => Ok(RuntimeValue::visible(MirValue::Iteration {
                 definition: *iteration,
                 case: *case,
@@ -4627,6 +4632,7 @@ impl<R: RuntimeAdapter> Engine<'_, '_, R> {
                 error,
                 case,
                 arguments,
+                ..
             } => Ok(RuntimeValue::visible(MirValue::Error {
                 error: *error,
                 case: *case,
@@ -5269,7 +5275,7 @@ fn view_text(view: &MirViewValue) -> Result<&str, ExecutionError> {
 fn view_bytes_reference(view: &MirViewValue) -> Result<ManagedReference, ExecutionError> {
     match &view.lender {
         MirViewLenderValue::Bytes(reference) => Ok(*reference),
-        _ => Err(ExecutionError::TypeMismatch),
+        MirViewLenderValue::Text(_) => Err(ExecutionError::TypeMismatch),
     }
 }
 

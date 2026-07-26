@@ -230,16 +230,19 @@ impl AllocationInfrastructure {
             let Some(page) = self.pages.get(&placement.page) else {
                 continue;
             };
+            let Ok(size_bytes) = super::state::object_size(page.object_map.slot_count()) else {
+                continue;
+            };
             let Some(region) = telemetry.get_mut(&page.region) else {
                 continue;
             };
-            region.live_bytes = region.live_bytes.saturating_add(placement.size_bytes);
+            region.live_bytes = region.live_bytes.saturating_add(size_bytes);
             region.object_count = region.object_count.saturating_add(1);
             region.reference_slot_count = region
                 .reference_slot_count
-                .saturating_add(page.reference_slots.len());
-            if placement.domain == HeapDomain::Pinned {
-                region.pinned_bytes = region.pinned_bytes.saturating_add(placement.size_bytes);
+                .saturating_add(page.object_map.reference_slot_count());
+            if page.domain == HeapDomain::Pinned {
+                region.pinned_bytes = region.pinned_bytes.saturating_add(size_bytes);
             }
         }
         for region in telemetry.values_mut() {

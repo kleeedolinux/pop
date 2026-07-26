@@ -5,7 +5,7 @@
 
 use std::fmt::Write;
 
-use pop_foundation::{BuiltinTypeId, FieldId, MethodId, ResultCaseId, SymbolId, TypeId, ValueId};
+use pop_foundation::{BuiltinTypeId, FieldId, MethodId, ResultCaseId, TypeId, ValueId};
 use pop_runtime_interface::{ArrayElementMap, ObjectMap, PanicPayload, UnwindReason};
 use pop_types::{
     CallableLifetimeSummary, FloatKind, FloatValue, IntegerKind, ParameterRetention,
@@ -639,40 +639,55 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
         MirInstructionKind::ResultMake {
             result,
             case,
+            allocation_site,
             arguments,
+            object_map,
         } => {
             let _ = write!(
                 output,
-                "resultMake bt{} resultCase#{} ",
+                "resultMake bt{} resultCase#{} site#{} ",
                 result.raw(),
-                case.raw()
+                case.raw(),
+                allocation_site.raw()
             );
+            dump_object_map(output, object_map);
+            output.push(' ');
             dump_value_list(output, arguments);
         }
         MirInstructionKind::IterationMake {
             iteration,
             case,
+            allocation_site,
             arguments,
+            object_map,
         } => {
             let _ = write!(
                 output,
-                "iterationMake bt{} iterationCase#{} ",
+                "iterationMake bt{} iterationCase#{} site#{} ",
                 iteration.raw(),
-                case.raw()
+                case.raw(),
+                allocation_site.raw()
             );
+            dump_object_map(output, object_map);
+            output.push(' ');
             dump_value_list(output, arguments);
         }
         MirInstructionKind::ErrorMake {
             error,
             case,
+            allocation_site,
             arguments,
+            object_map,
         } => {
             let _ = write!(
                 output,
-                "errorMake e{} errorCase#{} ",
+                "errorMake e{} errorCase#{} site#{} ",
                 error.raw(),
-                case.raw()
+                case.raw(),
+                allocation_site.raw()
             );
+            dump_object_map(output, object_map);
+            output.push(' ');
             dump_value_list(output, arguments);
         }
         MirInstructionKind::ResultIsOk { result, definition } => {
@@ -786,7 +801,7 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
                 2 => "CapabilityFailure",
                 _ => "invalid",
             };
-            let _ = write!(output, "codec.error {}", name);
+            let _ = write!(output, "codec.error {name}");
         }
         MirInstructionKind::FunctionReference(function) => {
             let _ = write!(output, "functionReference s{}", function.raw());
@@ -882,7 +897,16 @@ fn dump_instruction(output: &mut String, instruction: &MirInstructionKind) {
         MirInstructionKind::TaskStart { group, task } => {
             let _ = write!(output, "taskStart v{} v{}", group.raw(), task.raw());
         }
-        MirInstructionKind::TupleMake(values) => dump_values(output, "tupleMake", values),
+        MirInstructionKind::TupleMake {
+            allocation_site,
+            elements,
+            object_map,
+        } => {
+            let _ = write!(output, "tupleMake site#{} ", allocation_site.raw());
+            dump_object_map(output, object_map);
+            output.push(' ');
+            dump_value_list(output, elements);
+        }
         MirInstructionKind::TupleGet { tuple, index } => {
             let _ = write!(output, "tupleGet {index} v{}", tuple.raw());
         }
@@ -1638,24 +1662,56 @@ fn dump_callable_or_schema_instruction(
             dump_optional_result_case(output, *failure);
             dump_call_contract(output, *declared_effects, *unwind);
         }
-        MirInstructionKind::RecordMake { record, fields } => {
-            dump_fields(output, "recordMake", *record, None, fields);
-        }
-        MirInstructionKind::ClassMake {
-            class,
+        MirInstructionKind::RecordMake {
+            record,
+            allocation_site,
             fields,
             object_map,
         } => {
-            let _ = write!(output, "classMake c{} ", class.raw());
+            let _ = write!(
+                output,
+                "recordMake s{} site#{} ",
+                record.raw(),
+                allocation_site.raw()
+            );
+            dump_object_map(output, object_map);
+            output.push(' ');
+            dump_field_values(output, fields);
+        }
+        MirInstructionKind::ClassMake {
+            class,
+            allocation_site,
+            fields,
+            object_map,
+        } => {
+            let _ = write!(
+                output,
+                "classMake c{} site#{} ",
+                class.raw(),
+                allocation_site.raw()
+            );
             dump_object_map(output, object_map);
             output.push(' ');
             dump_field_values(output, fields);
         }
         MirInstructionKind::RecordUpdate {
             record,
+            allocation_site,
             base,
             fields,
-        } => dump_fields(output, "recordUpdate", *record, Some(*base), fields),
+            object_map,
+        } => {
+            let _ = write!(
+                output,
+                "recordUpdate s{} site#{} v{} ",
+                record.raw(),
+                allocation_site.raw(),
+                base.raw()
+            );
+            dump_object_map(output, object_map);
+            output.push(' ');
+            dump_field_values(output, fields);
+        }
         MirInstructionKind::FieldGet { base, field } => {
             let _ = write!(output, "fieldGet v{} field#{}", base.raw(), field.raw());
         }
@@ -1671,9 +1727,19 @@ fn dump_callable_or_schema_instruction(
         MirInstructionKind::UnionMake {
             union,
             case,
+            allocation_site,
             arguments,
+            object_map,
         } => {
-            let _ = write!(output, "unionMake s{} case#{} ", union.raw(), case.raw());
+            let _ = write!(
+                output,
+                "unionMake s{} case#{} site#{} ",
+                union.raw(),
+                case.raw(),
+                allocation_site.raw()
+            );
+            dump_object_map(output, object_map);
+            output.push(' ');
             dump_value_list(output, arguments);
         }
         MirInstructionKind::IterationIsItem {
@@ -1811,14 +1877,16 @@ fn dump_callable_or_schema_instruction(
         }
         MirInstructionKind::CaptureCellAllocate {
             binding,
+            allocation_site,
             initial,
             value_type,
             object_map,
         } => {
             let _ = write!(
                 output,
-                "captureCell.allocate bind{} v{} t{} ",
+                "captureCell.allocate bind{} site#{} v{} t{} ",
                 binding.raw(),
+                allocation_site.raw(),
                 initial.raw(),
                 value_type.raw()
             );
@@ -1833,14 +1901,16 @@ fn dump_callable_or_schema_instruction(
         MirInstructionKind::ClosureEnvironmentAllocate {
             owner,
             function,
+            allocation_site,
             captures,
             object_map,
         } => {
             let _ = write!(
                 output,
-                "closureEnvironment.allocate s{} nf{} ",
+                "closureEnvironment.allocate s{} nf{} site#{} ",
                 owner.raw(),
-                function.raw()
+                function.raw(),
+                allocation_site.raw()
             );
             dump_object_map(output, object_map);
             output.push_str(" captures[");
@@ -2162,27 +2232,6 @@ fn dump_value_list(output: &mut String, values: &[ValueId]) {
         let _ = write!(output, "v{}", value.raw());
     }
     output.push(')');
-}
-
-fn dump_fields(
-    output: &mut String,
-    name: &str,
-    record: SymbolId,
-    base: Option<ValueId>,
-    fields: &[(FieldId, ValueId)],
-) {
-    let _ = write!(output, "{name} s{}", record.raw());
-    if let Some(base) = base {
-        let _ = write!(output, " v{}", base.raw());
-    }
-    output.push_str(" {");
-    for (index, (field, value)) in fields.iter().enumerate() {
-        if index != 0 {
-            output.push_str(", ");
-        }
-        let _ = write!(output, "field#{}=v{}", field.raw(), value.raw());
-    }
-    output.push('}');
 }
 
 fn dump_field_values(output: &mut String, fields: &[(FieldId, ValueId)]) {

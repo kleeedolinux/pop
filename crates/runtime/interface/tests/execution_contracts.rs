@@ -1,9 +1,10 @@
 use pop_runtime_interface::{
-    AllocationClass, ArrayAllocationRequest, ArrayElementMap, BarrierKind,
-    GarbageCollectorContract, GarbageCollectorStage, ManagedReference, ObjectAllocationRequest,
-    ObjectMap, ObjectMapError, ObjectSlot, PanicKind, PanicPayload, RootMapError, RootPublication,
-    RootSlot, RuntimeFailure, SafePointId, StackMap, TableAllocationRequest, Trap, TrapKind,
-    UnwindReason, WriteBarrier,
+    AllocationClass, AllocationSiteDescriptor, ArrayAllocationRequest, ArrayElementMap,
+    BarrierKind, GarbageCollectorContract, GarbageCollectorStage, ManagedReference,
+    ObjectAllocationRequest, ObjectMap, ObjectMapError, ObjectSlot, PanicKind, PanicPayload,
+    RootMapError, RootPublication, RootSlot, RuntimeAllocationSiteId, RuntimeFailure,
+    RuntimeTypeId, SafePointId, StackMap, TableAllocationRequest, Trap, TrapKind, UnwindReason,
+    WriteBarrier,
 };
 
 #[test]
@@ -109,6 +110,80 @@ fn scalar_object_maps_are_canonical_without_reference_validation_work() {
 }
 
 #[test]
+fn homogeneous_reference_maps_do_not_materialize_per_slot_metadata() {
+    let map = ObjectMap::homogeneous_references(200_000);
+
+    assert_eq!(map.slot_count(), 200_000);
+    assert_eq!(map.reference_slot_count(), 200_000);
+    assert!(map.has_reference_slots());
+    assert!(map.reference_slots().is_empty());
+    assert!(map.is_reference_slot(ObjectSlot::new(0)));
+    assert!(map.is_reference_slot(ObjectSlot::new(199_999)));
+    assert_eq!(
+        map.iter_reference_slots().take(3).collect::<Vec<_>>(),
+        vec![ObjectSlot::new(0), ObjectSlot::new(1), ObjectSlot::new(2)]
+    );
+}
+
+#[test]
+fn interleaved_table_maps_do_not_materialize_per_entry_metadata() {
+    let table = TableAllocationRequest::new(
+        RuntimeTypeId::new(19),
+        AllocationClass::Mature,
+        200_000,
+        ArrayElementMap::Scalar,
+        ArrayElementMap::ManagedReference,
+    )
+    .expect("interleaved table layout");
+    let map = table.object_map();
+
+    assert_eq!(map.slot_count(), 400_000);
+    assert_eq!(map.reference_slot_count(), 200_000);
+    assert!(map.reference_slots().is_empty());
+    assert!(!map.is_reference_slot(ObjectSlot::new(0)));
+    assert!(map.is_reference_slot(ObjectSlot::new(1)));
+    assert!(map.is_reference_slot(ObjectSlot::new(399_999)));
+    assert_eq!(
+        map.iter_reference_slots().take(3).collect::<Vec<_>>(),
+        [ObjectSlot::new(1), ObjectSlot::new(3), ObjectSlot::new(5)]
+    );
+}
+
+#[test]
+fn allocation_site_descriptors_retain_one_exact_typed_layout() {
+    let object_map =
+        ObjectMap::new(130, vec![ObjectSlot::new(1), ObjectSlot::new(129)]).expect("object map");
+    let descriptor = AllocationSiteDescriptor::new(
+        RuntimeAllocationSiteId::new(7, 9, 11),
+        RuntimeTypeId::new(19),
+        AllocationClass::Mature,
+        object_map,
+    );
+
+    assert_eq!(descriptor.site().bubble(), 7);
+    assert_eq!(descriptor.site().owner(), 9);
+    assert_eq!(descriptor.site().local(), 11);
+    assert_eq!(descriptor.type_id(), RuntimeTypeId::new(19));
+    assert_eq!(descriptor.allocation_class(), AllocationClass::Mature);
+    assert_eq!(descriptor.object_map().slot_count(), 130);
+    assert!(
+        descriptor
+            .object_map()
+            .is_reference_slot(ObjectSlot::new(1))
+    );
+    assert!(
+        descriptor
+            .object_map()
+            .is_reference_slot(ObjectSlot::new(129))
+    );
+    assert!(
+        !descriptor
+            .object_map()
+            .is_reference_slot(ObjectSlot::new(128))
+    );
+}
+
+#[test]
 fn root_publication_mutation_preserves_canonical_slots_and_stack_map() {
     let stack_map = StackMap::new(
         SafePointId::new(12),
@@ -186,8 +261,11 @@ fn allocation_and_barrier_requests_are_backend_neutral_and_typed() {
     assert_eq!(table.value_map(), ArrayElementMap::Scalar);
     assert_eq!(table.object_map().slot_count(), 8);
     assert_eq!(
-        table.object_map().reference_slots(),
-        &[
+        table
+            .object_map()
+            .iter_reference_slots()
+            .collect::<Vec<_>>(),
+        [
             ObjectSlot::new(0),
             ObjectSlot::new(2),
             ObjectSlot::new(4),

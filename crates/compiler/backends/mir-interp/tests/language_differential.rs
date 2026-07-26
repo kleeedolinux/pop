@@ -747,6 +747,7 @@ fn checked_nominal_cast_rejects_a_different_generic_specialization() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines, clippy::similar_names)]
 fn checked_nominal_cast_uses_the_producer_bubble_identity_after_reference_import() {
     let producer_bubble = BubbleId::from_raw(41);
     let producer_source = SourceFile::new(
@@ -892,6 +893,7 @@ fn checked_nominal_cast_uses_the_producer_bubble_identity_after_reference_import
 }
 
 #[test]
+#[allow(clippy::similar_names)]
 fn checked_nominal_cast_uses_exact_specialized_artifact_ancestry() {
     let producer_bubble = BubbleId::from_raw(91);
     let source = SourceFile::new(

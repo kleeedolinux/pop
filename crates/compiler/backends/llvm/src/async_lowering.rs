@@ -18,8 +18,8 @@ use crate::instruction_lowering::{
 use crate::lowering::{
     CaptureEnvironment, DirectScalarArrays, PrivateBlock, PrivateFunction,
     async_function_create_name, async_function_poll_name, async_nested_create_name,
-    async_nested_poll_name, initialize_array_outputs, native_runtime_symbol,
-    replace_llvm_value_token,
+    async_nested_poll_name, initialize_array_outputs, initialize_safe_point_root_arrays,
+    native_runtime_symbol, replace_llvm_value_token,
 };
 use crate::module_lowering::ClassRuntimeKeys;
 
@@ -386,6 +386,10 @@ fn poll_entry(
         "%pop_state = load i64, ptr %pop_state_out".to_owned(),
     ];
     instructions.extend(initialize_array_outputs(blocks, direct_scalar_arrays));
+    instructions.extend(initialize_safe_point_root_arrays(
+        blocks,
+        direct_scalar_arrays,
+    ));
     if has_environment {
         instructions.extend([
             "%pop_environment_out = alloca i64".to_owned(),

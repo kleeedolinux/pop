@@ -2,7 +2,7 @@
 
 use pop_runtime_collector::StableGenerationalRuntime;
 use pop_runtime_interface::{
-    AllocationClass, ObjectAllocationRequest, ObjectMap, ObjectSlot, RuntimeAdapter, RuntimeTypeId,
+    ObjectAllocationRequest, ObjectMap, ObjectSlot, RuntimeAdapter, RuntimeTypeId,
 };
 use pop_runtime_native_abi::IterationStatus;
 
@@ -36,8 +36,11 @@ pub extern "C" fn pop_rt_range_create(
     let Ok(object_map) = ObjectMap::new(5, Vec::new()) else {
         return 0;
     };
-    let request =
-        ObjectAllocationRequest::new(RuntimeTypeId::new(0), AllocationClass::Mature, object_map);
+    let request = ObjectAllocationRequest::new(
+        RuntimeTypeId::new(0),
+        crate::allocation::native_default_allocation_class(),
+        object_map,
+    );
     let Ok(range) = runtime.allocate_object(&request) else {
         return 0;
     };

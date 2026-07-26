@@ -58,27 +58,24 @@ pub(super) fn materialize_scalar(
 }
 
 pub(super) fn publish_materialized_scalar(
-    scalar: MaterializedScalar,
+    scalar: &MaterializedScalar,
     publish: impl FnOnce(u64),
 ) -> Result<(), CodecEventStatus> {
     match scalar {
         MaterializedScalar::Bits(bits) => {
-            publish(bits);
+            publish(*bits);
             Ok(())
         }
         MaterializedScalar::Managed(root) => {
             let mut runtime =
                 lock_abi_runtime().map_err(|_| CodecEventStatus::CapabilityFailure)?;
-            let reference = match runtime.resolve_root(root) {
-                Ok(reference) => reference,
-                Err(_) => {
-                    let _ = runtime.release_root(root);
-                    return Err(CodecEventStatus::CapabilityFailure);
-                }
+            let Ok(reference) = runtime.resolve_root(*root) else {
+                let _ = runtime.release_root(*root);
+                return Err(CodecEventStatus::CapabilityFailure);
             };
             publish(reference.raw());
             runtime
-                .release_root(root)
+                .release_root(*root)
                 .map_err(|_| CodecEventStatus::CapabilityFailure)
         }
     }

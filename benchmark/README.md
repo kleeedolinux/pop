@@ -71,6 +71,49 @@ The stable native collector currently stores each logical payload slot as one
 physical word and derives slot kind from precise layout metadata; benchmark
 changes must retain the scalar-equals-token negative tracing coverage.
 
+## Gate native heap changes
+
+ADR 0099 makes the two Pop Lang heap workloads one atomic regression gate.
+Capture the baseline and candidate on the same idle host, with the same
+collector stage and workload sources:
+
+```bash
+benchmark/bin/benchmark run \
+  --runtime poplang \
+  --workload allocationChurn --workload objectArray \
+  --cpu-affinity 2 \
+  --samples 50 --warmups 4 --output /tmp/pop-heap-baseline.json
+
+benchmark/bin/benchmark run \
+  --runtime poplang \
+  --workload allocationChurn --workload objectArray \
+  --cpu-affinity 2 \
+  --samples 50 --warmups 4 --output /tmp/pop-heap-candidate.json
+
+benchmark/bin/benchmark heap-gate \
+  --baseline /tmp/pop-heap-baseline.json \
+  --candidate /tmp/pop-heap-candidate.json \
+  --output /tmp/pop-heap-gate.json
+```
+
+Build the relevant revision before each capture. Every warmup and measured
+execution must print the exact workload checksum. The gate then requires at
+least 50 timing and peak-RSS samples for both workloads and rejects a median,
+nearest-rank P99, or maximum peak-RSS regression above 5%. An exact 5%
+increase passes.
+
+`--cpu-affinity` is optional and Linux-specific. When supplied, every checksum,
+warmup, and measured execution runs through `taskset`, and the selected logical
+CPU becomes part of the exact host profile. Use the same declared CPU for both
+captures. This is important on hybrid processors where unrestricted scheduling
+can mix materially different core classes.
+
+Peak-RSS gating currently requires Linux and GNU `/usr/bin/time`. Other hosts
+can still produce ordinary exploratory reports, but their missing memory
+samples fail closed when used as heap-gate evidence. Machine-local baseline and
+candidate files are evidence artifacts and are not portable performance
+claims.
+
 The default outputs are `results/latest.json` and `results/latest.html`.
 `run` writes JSON only, while `render` can regenerate HTML from an existing
 result:

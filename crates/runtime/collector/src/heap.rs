@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use pop_runtime_interface::{
     AllocationClass, ArrayElementMap, ManagedReference, ObjectMap, PinHandle, RootHandle,
-    RuntimeTypeId,
+    RuntimeAllocationSiteId, RuntimeTypeId,
 };
 
 mod slot;
 
-pub(crate) use slot::{SlotStorage, SlotValue};
+pub(crate) use slot::{PageWords, SlotStorage, SlotValue, zeroed_page_words};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeapLimits {
@@ -93,6 +93,12 @@ impl CollectorMetrics {
         self.allocations = self.allocations.saturating_add(1);
     }
 
+    pub(crate) fn record_allocations(&mut self, count: usize) {
+        self.allocations = self
+            .allocations
+            .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+    }
+
     pub(crate) fn rollback_allocation(&mut self) {
         self.allocations = self.allocations.saturating_sub(1);
     }
@@ -114,9 +120,10 @@ pub(crate) enum AllocationKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Allocation {
     pub(crate) kind: AllocationKind,
+    pub(crate) site: Option<RuntimeAllocationSiteId>,
     pub(crate) type_id: RuntimeTypeId,
     pub(crate) class: AllocationClass,
-    pub(crate) object_map: ObjectMap,
+    pub(crate) object_map: Arc<ObjectMap>,
     pub(crate) slots: SlotStorage,
     pub(crate) immutable_bytes: Option<Arc<[u8]>>,
 }

@@ -290,6 +290,19 @@ Architecture CI should eventually verify:
 - atomic immutable-shared graph proofs, verified backend-neutral barrier
   elision, explicit scheduler allocator identities, disjoint local token
   namespaces, and independently runnable local evacuation;
+- ADR 0099's paired native heap gate contract, including per-execution
+  checksums, compatible 50-sample evidence, median and nearest-rank P99 timing,
+  peak RSS, and atomic `allocationChurn`/`objectArray` acceptance;
+- ADR 0102's exact adjacent-pair proof, ABI 1.21 negotiation, unchanged
+  canonical MIR, failure-order equivalence, negative lowering boundaries, and
+  paired native heap-gate evidence;
+- ADR 0103's explicit production constructor/build composition, exact ABI 2
+  negotiation, mutator-overlapped immutable work, version-checked card
+  refinement, active-stack watermark progress, bounded stress, and default
+  ABI 1 non-selection;
+- ADR 0104's ABI 1.22 exact cyclic initialization, immutable self-slot
+  constants, closed iteration constructor, and constant-size
+  homogeneous/strided map proofs;
 - verified allocation-site/lifetime/region identities, closed retention
   summaries, every-exit static reclamation, precise region roots, conservative
   managed fallback, and no backend-only escape/free contract;

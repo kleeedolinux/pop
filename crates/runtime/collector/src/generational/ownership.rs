@@ -94,6 +94,9 @@ impl GenerationalRuntime {
             append_object_references(object, &mut pending)?;
         }
         for reference in &freeze {
+            self.allocation.invalidate_direct_access(*reference);
+        }
+        for reference in &freeze {
             self.nursery
                 .objects
                 .get_mut(reference)
@@ -199,6 +202,8 @@ impl GenerationalRuntime {
 
         let region = self.isolation.fresh_region()?;
         self.allocation = next_allocation;
+        self.allocation
+            .bind_all_payloads(&mut self.nursery.objects)?;
         for (reference, object) in self.nursery.objects.iter_mut() {
             if objects.contains(&reference) {
                 object.ownership = ObjectOwnership::Isolated(region);
@@ -294,6 +299,8 @@ impl GenerationalRuntime {
             return Err(BootstrapRuntime::out_of_memory(0, 0));
         }
         self.allocation = next_allocation;
+        self.allocation
+            .bind_all_payloads(&mut self.nursery.objects)?;
         for (reference, object) in self.nursery.objects.iter_mut() {
             if record.objects.contains(&reference) {
                 object.ownership = ObjectOwnership::SchedulerLocal(owner);
@@ -348,12 +355,11 @@ impl GenerationalRuntime {
             if !publish.insert(reference) {
                 continue;
             }
-            for slot in object.allocation.object_map.reference_slots() {
+            for slot in object.allocation.object_map.iter_reference_slots() {
                 let value = object
                     .allocation
                     .slots
                     .get(slot.raw() as usize)
-                    .copied()
                     .ok_or_else(RuntimeFailure::runtime_invariant)?;
                 if let Some(child) = value.as_reference() {
                     pending.push(child);
@@ -380,6 +386,8 @@ impl GenerationalRuntime {
         }
 
         self.allocation = next_allocation;
+        self.allocation
+            .bind_all_payloads(&mut self.nursery.objects)?;
         for reference in &publish {
             let object = self
                 .nursery
@@ -435,12 +443,11 @@ fn append_object_references(
     object: &crate::relocation::RelocationAllocation,
     pending: &mut Vec<ManagedReference>,
 ) -> Result<(), RuntimeFailure> {
-    for slot in object.allocation.object_map.reference_slots() {
+    for slot in object.allocation.object_map.iter_reference_slots() {
         let value = object
             .allocation
             .slots
             .get(slot.raw() as usize)
-            .copied()
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
         if let Some(reference) = value.as_reference() {
             pending.push(reference);

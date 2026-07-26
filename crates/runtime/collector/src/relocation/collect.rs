@@ -62,12 +62,21 @@ impl RelocationRuntime {
         }
 
         for object in next_objects.values_mut() {
-            for slot in object.allocation.object_map.reference_slots() {
-                let value = &mut object.allocation.slots[slot.raw() as usize];
+            for slot in object.allocation.object_map.iter_reference_slots() {
+                let index = slot.raw() as usize;
+                let value = object
+                    .allocation
+                    .slots
+                    .get(index)
+                    .expect("validated relocation slot");
                 if let Some(reference) = value.as_reference()
                     && let Some(relocated) = relocations.get(&reference)
                 {
-                    *value = SlotValue::reference(Some(*relocated));
+                    let changed = object
+                        .allocation
+                        .slots
+                        .set(index, SlotValue::reference(Some(*relocated)));
+                    debug_assert!(changed);
                 }
             }
         }
@@ -172,12 +181,11 @@ fn append_references(
     object: &super::heap::RelocationAllocation,
     pending: &mut Vec<ManagedReference>,
 ) -> Result<(), RuntimeFailure> {
-    for slot in object.allocation.object_map.reference_slots() {
+    for slot in object.allocation.object_map.iter_reference_slots() {
         let value = object
             .allocation
             .slots
             .get(slot.raw() as usize)
-            .copied()
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
         if let Some(reference) = value.as_reference() {
             pending.push(reference);
@@ -211,10 +219,13 @@ fn remembered_cards(
                 && object
                     .allocation
                     .object_map
-                    .reference_slots()
-                    .iter()
+                    .iter_reference_slots()
                     .any(|slot| {
-                        object.allocation.slots[slot.raw() as usize]
+                        object
+                            .allocation
+                            .slots
+                            .get(slot.raw() as usize)
+                            .expect("validated remembered-card slot")
                             .as_reference()
                             .is_some_and(|child| {
                                 objects.get(&child).is_some_and(|child| {

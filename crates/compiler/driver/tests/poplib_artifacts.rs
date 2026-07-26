@@ -138,6 +138,7 @@ fn poplib_emission_round_trips_generic_metadata_and_rejects_corruption() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines, clippy::similar_names)]
 fn poplib_inventories_and_verifies_public_typed_retained_adapters() {
     let bubble = BubbleId::from_raw(9);
     let library = analyze_bubble(FrontEndBubbleInput::new(
@@ -304,7 +305,7 @@ fn poplib_inventories_and_verifies_public_typed_retained_adapters() {
             .iter()
             .find(|function| function.symbol() == encode)
             .expect("reconstructed encode entry MIR");
-        assert!(encode.blocks().iter().flat_map(|block| block.instructions()).any(
+        assert!(encode.blocks().iter().flat_map(pop_mir::MirBlock::instructions).any(
             |instruction| matches!(instruction.kind(), MirInstructionKind::CodecEncode { adapter: found, .. } if *found == adapter)
         ));
         let decode = consumer_mir
@@ -312,7 +313,7 @@ fn poplib_inventories_and_verifies_public_typed_retained_adapters() {
             .iter()
             .find(|function| function.symbol() == decode)
             .expect("reconstructed decode entry MIR");
-        assert!(decode.blocks().iter().flat_map(|block| block.instructions()).any(
+        assert!(decode.blocks().iter().flat_map(pop_mir::MirBlock::instructions).any(
             |instruction| matches!(instruction.kind(), MirInstructionKind::CodecDecode { adapter: found, .. } if *found == adapter)
         ));
     }

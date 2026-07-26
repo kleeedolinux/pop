@@ -39,13 +39,11 @@ cycle. It preserves snapshot edges, shades roots, pins, and new mature objects,
 removes dead placements without rescanning the page inventory for every object,
 reclaims empty pages once when the sweep completes, and defers nursery
 relocation while a major snapshot still contains physical tokens. The
-generational composition deliberately continues to report
-`RelocationConformance`. Native correctness-stage workers now bind exact
-mutator registrations, retained ready/suspended task roots, collector epochs,
-and the ABI 2 writable-root transition through the stable native facade. Worker
-batches still join each bounded collector slice rather than tracing
-concurrently with mutator execution, so `ProductionConcurrentGenerational`
-cannot yet be selected.
+ordinary generational composition deliberately continues to report
+`RelocationConformance`. ADR 0103's separate production constructor returns
+with immutable mature work in flight, restarts version-stale card refinement,
+drains bounded per-mutator SATB buffers, advances exact active-stack
+watermarks, and reports `ProductionConcurrentGenerational`.
 
 `StableGenerationalRuntime` is the closed ADR 0070 native composition. It maps
 ABI 1 nursery-eligible requests into stable mature placement, exposes the typed
@@ -58,8 +56,9 @@ ADR 0077 scheduler integration retains canonical root publications for every
 non-running task frame and binds each managed native operation to one exact
 worker mutator and logical scheduler. Managed ABI 2 writable-root calls use the
 same binding and acknowledge an active collector epoch exactly once. This is
-correctness proof for the stable serialized facade; it does not advertise ABI
-2 support or make the production concurrent collector selectable.
+correctness proof shared by the stable serialized facade and ADR 0103's
+separately built ABI 2 production facade. Only the latter advertises ABI 2 and
+selects moving nursery execution.
 
 Atomic object construction and scalar or managed-array bulk construction write
 the complete precise payload before publication. Two-slot payloads stay inline,
@@ -67,12 +66,12 @@ use exactly one physical machine word per logical slot, and are interpreted
 only through the exact object map. Monotonically assigned managed tokens index
 deterministic sliding segment directories for both objects and placements;
 directory coordinates recover the token without storing a duplicate token in
-every entry. Homogeneous managed arrays use their allocation descriptor for
-constant-time element classification rather than searching the complete
-pointer map on every store. The stable-only reference barrier preserves SATB/post-scan
-shading while omitting the impossible mature-to-young card path. This wrapper
-never invokes nursery relocation or selective evacuation; those remain gated on
-ABI 2 writable-root proof.
+every entry. Homogeneous arrays and interleaved tables use constant-size
+formula maps for constant-time classification rather than materialized
+per-element pointer maps. The stable-only reference barrier preserves
+SATB/post-scan shading while omitting the impossible mature-to-young card path.
+This wrapper never invokes nursery relocation or selective evacuation; those
+belong to the separate ABI 2 production composition.
 
 The same conformance runtime now records concrete Stage-2 allocation placement:
 validated region/page/TLAB geometry, monomorphic page descriptors with precise
@@ -108,10 +107,22 @@ target with sixteen MiB of default startup headroom, performs bounded
 mature-cycle assists, returns empty logical pages, and
 reports domain/debt/pressure/OOM telemetry. These logical descriptors validate
 ownership and allocation transitions without exposing a raw address through
-PLRI. Parallel per-scheduler TLAB ownership, virtual-memory reservation,
-size-class reuse, adaptive worker sizing and stealing policy, concurrent card
-refinement/lazy sweeping, and measured production fast paths remain required
-before the production profile.
+PLRI. Monomorphic pages now own one contiguous atomic-word payload, initialized
+objects and arrays write their final unpublished values directly into the
+destination page, and objects retain checked page-range storage rather than a
+separate host payload. Exact page spans support cached reads only while their
+shared placement revision remains current; relocation, evacuation, ownership
+moves, and reclamation invalidate retained access before a stale result can be
+published. Scalar direct stores use a per-access writer-admission slot so
+invalidation waits for the current page write. Mutable scheduler-local mature
+reference arrays may use the same checked mechanism for mature targets owned by
+that scheduler while no major cycle is active. Major-cycle start invalidates
+all such capabilities before marking, and the target span advances its
+published-token watermark only after complete object publication. Parallel
+per-scheduler TLAB ownership, virtual-memory reservation, size-class reuse,
+adaptive worker sizing and stealing policy, concurrent card refinement/lazy
+sweeping, and measured production fast paths remain required before the
+production profile.
 
 Scoped pin metadata counts handles separately from uniquely pinned objects and
 tracks age in deterministic safe-point units. A configurable threshold reports

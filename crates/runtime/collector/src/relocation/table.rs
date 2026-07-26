@@ -4,16 +4,19 @@ use std::collections::VecDeque;
 
 use pop_runtime_interface::ManagedReference;
 
+mod insertion;
+mod segment;
+
+use segment::{Segment, SegmentWindow};
+
 const SEGMENT_LENGTH: usize = 256;
-type SegmentEntry<Value> = Option<Value>;
-type Segment<Value> = Box<[SegmentEntry<Value>]>;
-type SegmentWindow<Value> = VecDeque<Option<Segment<Value>>>;
 
 #[derive(Clone, Debug)]
 pub(crate) struct ObjectTable<Value> {
     base_segment: Option<u64>,
     segments: SegmentWindow<Value>,
     length: usize,
+    highest_reference: Option<u64>,
 }
 
 impl<Value> ObjectTable<Value> {
@@ -22,6 +25,7 @@ impl<Value> ObjectTable<Value> {
             base_segment: None,
             segments: VecDeque::new(),
             length: 0,
+            highest_reference: None,
         }
     }
 
@@ -38,33 +42,49 @@ impl<Value> ObjectTable<Value> {
         self.get(reference).is_some()
     }
 
+    pub(crate) fn contains_range(&self, first: ManagedReference, last: ManagedReference) -> bool {
+        if first > last {
+            return false;
+        }
+        let Some((first_segment, first_offset)) = coordinates(first) else {
+            return false;
+        };
+        let Some((last_segment, last_offset)) = coordinates(last) else {
+            return false;
+        };
+        (first_segment..=last_segment).all(|segment| {
+            let Some(index) = self.segment_index(segment) else {
+                return false;
+            };
+            let Some(entries) = self.segments.get(index).and_then(Option::as_ref) else {
+                return false;
+            };
+            let start = if segment == first_segment {
+                first_offset
+            } else {
+                0
+            };
+            let end = if segment == last_segment {
+                last_offset + 1
+            } else {
+                SEGMENT_LENGTH
+            };
+            entries.contains_range(start, end)
+        })
+    }
+
     #[allow(clippy::trivially_copy_pass_by_ref)]
     pub(crate) fn get(&self, reference: &ManagedReference) -> Option<&Value> {
         let (segment, offset) = coordinates(*reference)?;
         let index = self.segment_index(segment)?;
-        self.segments.get(index)?.as_ref()?.get(offset)?.as_ref()
+        self.segments.get(index)?.as_ref()?.get(offset)
     }
 
     #[allow(clippy::trivially_copy_pass_by_ref)]
     pub(crate) fn get_mut(&mut self, reference: &ManagedReference) -> Option<&mut Value> {
         let (segment, offset) = coordinates(*reference)?;
         let index = self.segment_index(segment)?;
-        self.segments
-            .get_mut(index)?
-            .as_mut()?
-            .get_mut(offset)?
-            .as_mut()
-    }
-
-    pub(crate) fn insert(&mut self, reference: ManagedReference, value: Value) -> Option<Value> {
-        let (segment, offset) = coordinates(reference).expect("managed references are nonzero");
-        let index = self.ensure_segment_index(segment);
-        let entries = self.segments[index].get_or_insert_with(empty_segment);
-        let previous = entries[offset].replace(value);
-        if previous.is_none() {
-            self.length = self.length.saturating_add(1);
-        }
-        previous
+        self.segments.get_mut(index)?.as_mut()?.get_mut(offset)
     }
 
     #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -73,8 +93,8 @@ impl<Value> ObjectTable<Value> {
         let index = self.segment_index(segment)?;
         let (removed, empty) = {
             let entries = self.segments.get_mut(index)?.as_mut()?;
-            let removed = entries.get_mut(offset)?.take();
-            let empty = removed.is_some() && entries.iter().all(Option::is_none);
+            let removed = entries.remove(offset);
+            let empty = removed.is_some() && entries.is_empty();
             (removed, empty)
         };
         if removed.is_some() {
@@ -94,18 +114,13 @@ impl<Value> ObjectTable<Value> {
             .enumerate()
             .filter_map(|(relative, segment)| segment.as_ref().map(|entries| (relative, entries)))
             .flat_map(move |(relative, entries)| {
-                entries
-                    .iter()
-                    .enumerate()
-                    .filter_map(move |(offset, entry)| {
-                        entry.as_ref().map(|value| {
-                            (
-                                reference_at(base, relative, offset)
-                                    .expect("stored segment coordinate is representable"),
-                                value,
-                            )
-                        })
-                    })
+                entries.iter().map(move |(offset, value)| {
+                    (
+                        reference_at(base, relative, offset)
+                            .expect("stored segment coordinate is representable"),
+                        value,
+                    )
+                })
             })
     }
 
@@ -116,18 +131,13 @@ impl<Value> ObjectTable<Value> {
             .enumerate()
             .filter_map(|(relative, segment)| segment.as_mut().map(|entries| (relative, entries)))
             .flat_map(move |(relative, entries)| {
-                entries
-                    .iter_mut()
-                    .enumerate()
-                    .filter_map(move |(offset, entry)| {
-                        entry.as_mut().map(|value| {
-                            (
-                                reference_at(base, relative, offset)
-                                    .expect("stored segment coordinate is representable"),
-                                value,
-                            )
-                        })
-                    })
+                entries.iter_mut().map(move |(offset, value)| {
+                    (
+                        reference_at(base, relative, offset)
+                            .expect("stored segment coordinate is representable"),
+                        value,
+                    )
+                })
             })
     }
 
@@ -162,13 +172,9 @@ impl<Value> ObjectTable<Value> {
             } else {
                 0
             };
-            if let Some((found, value)) = entries[offset..]
-                .iter()
-                .enumerate()
-                .find_map(|(relative, entry)| entry.as_ref().map(|value| (relative, value)))
-            {
+            if let Some((found, value)) = entries.next_at(offset) {
                 return Some((
-                    reference_at(base, usize::try_from(segment - base).ok()?, offset + found)?,
+                    reference_at(base, usize::try_from(segment - base).ok()?, found)?,
                     value,
                 ));
             }
@@ -238,71 +244,5 @@ fn reference_at(base: u64, relative: usize, offset: usize) -> Option<ManagedRefe
     Some(ManagedReference::new(raw))
 }
 
-fn empty_segment<Value>() -> Segment<Value> {
-    std::iter::repeat_with(|| None)
-        .take(SEGMENT_LENGTH)
-        .collect::<Vec<_>>()
-        .into_boxed_slice()
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn reference(raw: u64) -> ManagedReference {
-        ManagedReference::new(raw)
-    }
-
-    #[test]
-    fn segment_entries_store_only_the_value_payload() {
-        assert_eq!(
-            std::mem::size_of::<SegmentEntry<u64>>(),
-            std::mem::size_of::<Option<u64>>()
-        );
-    }
-
-    #[test]
-    fn segmented_table_preserves_exact_token_order_across_segments() {
-        let mut table = ObjectTable::new();
-        table.insert(reference(1_024), "fourth");
-        table.insert(reference(257), "third");
-        table.insert(reference(1), "first");
-        table.insert(reference(256), "second");
-
-        assert_eq!(table.len(), 4);
-        assert_eq!(
-            table
-                .iter()
-                .map(|(reference, value)| (reference.raw(), *value))
-                .collect::<Vec<_>>(),
-            vec![
-                (1, "first"),
-                (256, "second"),
-                (257, "third"),
-                (1_024, "fourth")
-            ]
-        );
-        assert_eq!(
-            table
-                .next_after(Some(reference(256)))
-                .map(|entry| entry.0.raw()),
-            Some(257)
-        );
-    }
-
-    #[test]
-    fn segmented_table_removes_empty_segments_and_skips_their_token_ranges() {
-        let mut table = ObjectTable::new();
-        table.insert(reference(1), 10);
-        table.insert(reference(256), 20);
-        table.insert(reference(257), 30);
-
-        assert_eq!(table.remove(&reference(1)), Some(10));
-        assert_eq!(table.remove(&reference(256)), Some(20));
-        assert!(!table.contains_key(&reference(1)));
-        assert_eq!(table.next_after(None).map(|entry| entry.0.raw()), Some(257));
-        assert_eq!(table.remove(&reference(257)), Some(30));
-        assert_eq!(table.len(), 0);
-        assert!(table.next_after(None).is_none());
-    }
-}
+mod tests;

@@ -21,11 +21,26 @@ impl NativeAbiVersion {
     }
 }
 
-pub const NATIVE_ABI_1_VERSION: NativeAbiVersion = NativeAbiVersion::new(1, 19);
+pub const NATIVE_ABI_1_VERSION: NativeAbiVersion = NativeAbiVersion::new(1, 22);
 pub const NATIVE_ABI_2_VERSION: NativeAbiVersion = NativeAbiVersion::new(2, 0);
 pub const ABI_SUPPORT_SYMBOL: &str = "pop_rt_supports_abi";
 pub const GC_SAFE_POINT_V2_SYMBOL: &str = "pop_rt_gc_safe_point_v2";
 pub const INVALID_HANDLE: u64 = 0;
+
+/// Immutable compiler-emitted ABI 1.22 allocation-site layout.
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct AllocationSiteDescriptorAbi {
+    pub bubble: u32,
+    pub owner: u32,
+    pub site: u32,
+    pub runtime_type: u32,
+    pub allocation_class: u8,
+    pub reserved: [u8; 3],
+    pub slot_count: u32,
+    pub reference_count: u32,
+    pub reference_slots: *const u32,
+}
 
 /// Exact ABI 1.19 writer event function shape.
 pub type CodecWriteEventAbi = unsafe extern "C" fn(u64, u8, u32, *const u8, u64, u64, u64) -> u8;

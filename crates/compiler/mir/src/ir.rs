@@ -1801,17 +1801,23 @@ pub enum MirInstructionKind {
     ResultMake {
         result: BuiltinTypeId,
         case: ResultCaseId,
+        allocation_site: AllocationSiteId,
         arguments: Vec<ValueId>,
+        object_map: ObjectMap,
     },
     IterationMake {
         iteration: BuiltinTypeId,
         case: IterationCaseId,
+        allocation_site: AllocationSiteId,
         arguments: Vec<ValueId>,
+        object_map: ObjectMap,
     },
     ErrorMake {
         error: ErrorId,
         case: ErrorCaseId,
+        allocation_site: AllocationSiteId,
         arguments: Vec<ValueId>,
+        object_map: ObjectMap,
     },
     ResultIsOk {
         result: ValueId,
@@ -1876,7 +1882,11 @@ pub enum MirInstructionKind {
         group: ValueId,
         task: ValueId,
     },
-    TupleMake(Vec<ValueId>),
+    TupleMake {
+        allocation_site: AllocationSiteId,
+        elements: Vec<ValueId>,
+        object_map: ObjectMap,
+    },
     TupleGet {
         tuple: ValueId,
         index: u32,
@@ -2201,17 +2211,22 @@ pub enum MirInstructionKind {
     },
     RecordMake {
         record: SymbolId,
+        allocation_site: AllocationSiteId,
         fields: Vec<(FieldId, ValueId)>,
+        object_map: ObjectMap,
     },
     ClassMake {
         class: ClassId,
+        allocation_site: AllocationSiteId,
         fields: Vec<(FieldId, ValueId)>,
         object_map: ObjectMap,
     },
     RecordUpdate {
         record: SymbolId,
+        allocation_site: AllocationSiteId,
         base: ValueId,
         fields: Vec<(FieldId, ValueId)>,
+        object_map: ObjectMap,
     },
     FieldGet {
         base: ValueId,
@@ -2225,7 +2240,9 @@ pub enum MirInstructionKind {
     UnionMake {
         union: SymbolId,
         case: UnionCaseId,
+        allocation_site: AllocationSiteId,
         arguments: Vec<ValueId>,
+        object_map: ObjectMap,
     },
     IterationIsItem {
         iteration: ValueId,
@@ -2287,6 +2304,7 @@ pub enum MirInstructionKind {
     },
     CaptureCellAllocate {
         binding: BindingId,
+        allocation_site: AllocationSiteId,
         initial: ValueId,
         value_type: TypeId,
         object_map: ObjectMap,
@@ -2301,6 +2319,7 @@ pub enum MirInstructionKind {
     ClosureEnvironmentAllocate {
         owner: SymbolId,
         function: NestedFunctionId,
+        allocation_site: AllocationSiteId,
         captures: Vec<MirClosureCapture>,
         object_map: ObjectMap,
     },
@@ -2683,6 +2702,10 @@ impl MirUnionSwitchArm {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MirVerificationError {
     DuplicateFunction(SymbolId),
+    DuplicateAllocationSite {
+        function: SymbolId,
+        site: AllocationSiteId,
+    },
     InvalidCallableLifetimeSummary(SymbolId),
     InvalidForeignFunction(SymbolId),
     GenericSpecializationBudgetExceeded {

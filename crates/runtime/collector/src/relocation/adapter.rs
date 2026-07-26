@@ -33,6 +33,7 @@ impl RuntimeAdapter for RelocationRuntime {
         request: &ObjectAllocationRequest,
     ) -> Result<ManagedReference, RuntimeFailure> {
         self.allocate(
+            request.allocation_site(),
             request.type_id(),
             request.allocation_class(),
             AllocationKind::Object,
@@ -53,6 +54,7 @@ impl RuntimeAdapter for RelocationRuntime {
         let object_map = ObjectMap::new(request.length(), references)
             .map_err(|_| RuntimeFailure::runtime_invariant())?;
         self.allocate(
+            None,
             request.type_id(),
             request.allocation_class(),
             AllocationKind::Array(request.element_map()),
@@ -65,6 +67,7 @@ impl RuntimeAdapter for RelocationRuntime {
         request: &TableAllocationRequest,
     ) -> Result<ManagedReference, RuntimeFailure> {
         self.allocate(
+            None,
             request.type_id(),
             request.allocation_class(),
             AllocationKind::Table,

@@ -195,6 +195,15 @@ make every control-flow frontier explicit. The first proof kinds are
 `NonEscapingAllocation` and `CommonLifetimeRegion`; the verifier reconstructs
 them rather than trusting a backend or source annotation.
 
+Under ADR 0100, fixed-layout managed construction preserves the exact semantic
+type, closed allocation class, slot count, and precise object map attached to
+that `AllocationSiteId`. This includes records, classes, record updates, tuples,
+unions, `Result`/`Iteration`/typed-error cases, capture cells, and closure
+environments. Allocation-site identity is unique across one owning callable
+and all of its nested functions. Backends may materialize one immutable private
+allocation-site descriptor from those verified MIR facts. Descriptor addresses,
+native field widths, caches, and native symbols never enter HIR or MIR.
+
 Callable HIR/MIR types and public reference metadata carry ADR 0097's structured
 `CallableLifetimeSummary`. Each parameter is `DoesNotRetain`, conservative
 `MayRetain`, `StoresInto(targetParameter)`, `Captures`, or `Publishes`; each
@@ -363,6 +372,10 @@ MIR invariants:
   every exit by `leaveForeign`, carries the ADR 0081 mandatory effects/layouts,
   and cannot retain or suspend with an ADR 0082 pin/buffer borrow;
 - evaluation order matches Pop Lang semantics;
+- native transition fusion may combine only ADR 0102's verified adjacent
+  physical ABI calls; it never adds a fused canonical MIR operation or crosses
+  an instruction, effect, safe point, trap edge, root boundary, or control-flow
+  edge;
 - all target assumptions come from target queries;
 - every call and member/collection operation has statically known types;
 - no instruction performs name lookup or type discovery from a runtime string;

@@ -148,7 +148,7 @@ pub(crate) fn lower_checked_downcast_helpers(
             let mut matched = "false".to_owned();
             for (index, class) in accepted.iter().enumerate() {
                 let comparison = format!("%match_{index}");
-                instructions.push(format!("{comparison} = icmp eq i64 %class, {class}",));
+                instructions.push(format!("{comparison} = icmp eq i64 %class, {class}"));
                 if index == 0 {
                     matched = comparison;
                 } else {
@@ -206,12 +206,180 @@ pub(crate) fn render_class_runtime_descriptors(
         .collect()
 }
 
+pub(crate) fn render_allocation_site_descriptors(
+    bubble: &MirBubble,
+    moving_nursery: bool,
+) -> Result<Vec<String>, LlvmLoweringError> {
+    let mut descriptors = BTreeMap::new();
+    for (owner, blocks) in bubble
+        .functions()
+        .iter()
+        .map(|function| (function.symbol(), function.blocks()))
+        .chain(
+            bubble
+                .methods()
+                .iter()
+                .map(|method| (method.function().symbol(), method.function().blocks())),
+        )
+        .chain(
+            bubble
+                .nested_functions()
+                .iter()
+                .map(|function| (function.owner(), function.blocks())),
+        )
+    {
+        for instruction in blocks.iter().flat_map(pop_mir::MirBlock::instructions) {
+            let (site, slot_count, references, self_slots) = match instruction.kind() {
+                MirInstructionKind::RecordMake {
+                    allocation_site,
+                    object_map,
+                    ..
+                }
+                | MirInstructionKind::RecordUpdate {
+                    allocation_site,
+                    object_map,
+                    ..
+                }
+                | MirInstructionKind::TupleMake {
+                    allocation_site,
+                    object_map,
+                    ..
+                }
+                | MirInstructionKind::UnionMake {
+                    allocation_site,
+                    object_map,
+                    ..
+                }
+                | MirInstructionKind::ResultMake {
+                    allocation_site,
+                    object_map,
+                    ..
+                }
+                | MirInstructionKind::IterationMake {
+                    allocation_site,
+                    object_map,
+                    ..
+                }
+                | MirInstructionKind::ErrorMake {
+                    allocation_site,
+                    object_map,
+                    ..
+                }
+                | MirInstructionKind::CaptureCellAllocate {
+                    allocation_site,
+                    object_map,
+                    ..
+                } => (
+                    *allocation_site,
+                    object_map.slot_count(),
+                    object_map
+                        .reference_slots()
+                        .iter()
+                        .map(|slot| slot.raw())
+                        .collect::<Vec<_>>(),
+                    Vec::new(),
+                ),
+                MirInstructionKind::ClosureEnvironmentAllocate {
+                    allocation_site,
+                    object_map,
+                    captures,
+                    ..
+                } => (
+                    *allocation_site,
+                    object_map.slot_count(),
+                    object_map
+                        .reference_slots()
+                        .iter()
+                        .map(|slot| slot.raw())
+                        .collect::<Vec<_>>(),
+                    captures
+                        .iter()
+                        .filter(|capture| capture.self_reference())
+                        .map(|capture| capture.slot().saturating_add(1))
+                        .collect::<Vec<_>>(),
+                ),
+                MirInstructionKind::ClassMake {
+                    allocation_site,
+                    object_map,
+                    ..
+                } => (
+                    *allocation_site,
+                    object_map.slot_count() + 1,
+                    object_map
+                        .reference_slots()
+                        .iter()
+                        .map(|slot| slot.raw().saturating_add(1))
+                        .collect::<Vec<_>>(),
+                    Vec::new(),
+                ),
+                _ => continue,
+            };
+            let symbol =
+                crate::instruction_lowering::allocation_site_symbol(bubble.bubble(), owner, site);
+            let reference_symbol = format!("{symbol}_references");
+            let reference_pointer = if references.is_empty() {
+                "null".to_owned()
+            } else {
+                format!("@{reference_symbol}")
+            };
+            let reference_constant = (!references.is_empty()).then(|| {
+                let values = references
+                    .iter()
+                    .map(|slot| format!("i32 {slot}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "@{reference_symbol} = private unnamed_addr constant [{} x i32] [{values}]",
+                    references.len()
+                )
+            });
+            let self_slot_symbol = format!("{symbol}_self_slots");
+            let self_slot_constant = (!self_slots.is_empty()).then(|| {
+                let values = self_slots
+                    .iter()
+                    .map(|slot| format!("i32 {slot}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "@{self_slot_symbol} = private unnamed_addr constant [{} x i32] [{values}]",
+                    self_slots.len()
+                )
+            });
+            let descriptor = format!(
+                "@{symbol} = private unnamed_addr constant {{ i32, i32, i32, i32, i8, [3 x i8], i32, i32, ptr }} {{ i32 {}, i32 {}, i32 {}, i32 {}, i8 {}, [3 x i8] zeroinitializer, i32 {slot_count}, i32 {}, ptr {reference_pointer} }}",
+                bubble.bubble().raw(),
+                owner.raw(),
+                site.raw(),
+                instruction.result_type().raw(),
+                u8::from(!moving_nursery),
+                references.len()
+            );
+            let entry = (reference_constant, self_slot_constant, descriptor);
+            if let Some(previous) = descriptors.get(&symbol) {
+                if previous != &entry {
+                    return Err(LlvmLoweringError::InvalidType(instruction.result_type()));
+                }
+            } else {
+                descriptors.insert(symbol, entry);
+            }
+        }
+    }
+    Ok(descriptors
+        .into_values()
+        .flat_map(|(references, self_slots, descriptor)| {
+            references.into_iter().chain(self_slots).chain([descriptor])
+        })
+        .collect())
+}
+
 fn nominal_runtime_key(identity: &pop_types::CanonicalNominalIdentity) -> String {
     let encoded = identity
         .descriptor()
         .bytes()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+        .fold(String::new(), |mut encoded, byte| {
+            let _ = write!(encoded, "{byte:02x}");
+            encoded
+        });
     format!("ptrtoint (ptr @pop_nominal_{encoded} to i64)")
 }
 
@@ -451,6 +619,18 @@ pub(crate) fn runtime_declarations() -> Vec<String> {
             native_runtime_symbol(RuntimeOperation::ArrayGetChecked)
         ),
         format!(
+            "declare i8 @{}(i64, i64, i64, ptr) nounwind",
+            pop_runtime_native_abi::ARRAY_GET_OBJECT_FIELD_CHECKED_SYMBOL
+        ),
+        format!(
+            "declare i64 @{}(ptr, ptr, i64, i64, i64) nounwind",
+            pop_runtime_native_abi::ALLOCATE_INITIALIZED_OBJECT_AT_SITE_AND_STORE_ARRAY_SYMBOL
+        ),
+        format!(
+            "declare i64 @{}(ptr, ptr, i64, ptr, i64) nounwind",
+            pop_runtime_native_abi::ALLOCATE_INITIALIZED_SELF_REFERENTIAL_OBJECT_AT_SITE_SYMBOL
+        ),
+        format!(
             "declare i64 @{}(i64, i64) nounwind",
             native_runtime_symbol(RuntimeOperation::FieldGet)
         ),
@@ -497,6 +677,10 @@ pub(crate) fn runtime_declarations() -> Vec<String> {
         format!(
             "declare i8 @{}(i64, ptr) nounwind",
             native_runtime_symbol(RuntimeOperation::IterationNext)
+        ),
+        format!(
+            "declare i64 @{}(i8, i64, i1) nounwind",
+            pop_runtime_native_abi::ITERATION_MAKE_SYMBOL
         ),
         format!(
             "declare i8 @{}(i64, i64, i64) nounwind",

@@ -3,12 +3,14 @@
 
 require "benchmark"
 require "digest"
+require "etc"
 require "fileutils"
 require "json"
 require "open3"
 require "optparse"
 require "rbconfig"
 require "shellwords"
+require "tempfile"
 require "time"
 
 # A small DSL keeps the benchmark matrix declarative while the runner owns the
@@ -23,6 +25,7 @@ module PopBenchmark
 
   Runtime = Data.define(:id, :name, :source_directory, :source_extension, :command, :provisioner, :builder, :mode)
   Workload = Data.define(:id, :name, :category, :description, :expected_output)
+  Measurement = Data.define(:nanoseconds, :peak_rss_kib)
 
   class Registry
     attr_reader :runtimes, :workloads
@@ -74,9 +77,278 @@ module PopBenchmark
       output
     end
 
+    def measure(*arguments, chdir: ROOT, environment: {})
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond)
+      output, status, peak_rss_kib = measured_capture(arguments, chdir:, environment:)
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC, :nanosecond) - started
+      raise "command failed (#{Shellwords.join(arguments)}):\n#{output}" unless status.success?
+
+      [output, Measurement.new(elapsed, peak_rss_kib)]
+    end
+
+    def measured_capture(arguments, chdir:, environment:)
+      return [*Open3.capture2e(environment, *arguments, chdir:), nil] unless linux_time?
+
+      file = Tempfile.new("pop-benchmark-rss")
+      file.close
+      output, status = Open3.capture2e(
+        environment,
+        "/usr/bin/time", "--format=%M", "--output=#{file.path}",
+        *arguments,
+        chdir:
+      )
+      peak_rss_kib = Integer(File.read(file.path).strip, 10)
+      [output, status, peak_rss_kib]
+    ensure
+      file&.unlink
+    end
+
+    def linux_time?
+      RbConfig::CONFIG.fetch("host_os").match?(/linux/) &&
+        File.executable?("/usr/bin/time")
+    end
+
     def download(url, output)
       FileUtils.mkdir_p(File.dirname(output))
       run("curl", "--fail", "--location", "--retry", "3", "--output", output, url)
+    end
+  end
+
+  module HostProfile
+    module_function
+
+    def current(cpu_affinity: nil)
+      {
+        "targetArchitecture" => RbConfig::CONFIG.fetch("host_cpu"),
+        "targetOperatingSystem" => operating_system,
+        "availableParallelism" => Etc.nprocessors,
+        "processorIdentity" => processor_identity,
+        "cpuAffinity" => cpu_affinity.nil? ? "unrestricted" : cpu_affinity.to_s
+      }
+    end
+
+    def operating_system
+      host = RbConfig::CONFIG.fetch("host_os")
+      return "linux" if host.match?(/linux/)
+      return "macos" if host.match?(/darwin/)
+
+      host
+    end
+
+    def processor_identity
+      return RbConfig::CONFIG.fetch("host_cpu") unless File.file?("/proc/cpuinfo")
+
+      File.foreach("/proc/cpuinfo") do |line|
+        key, value = line.split(":", 2)
+        return value.strip if key&.strip == "model name" && value
+      end
+      RbConfig::CONFIG.fetch("host_cpu")
+    end
+  end
+
+  module Statistics
+    module_function
+
+    def median(values)
+      sorted = values.sort
+      sorted.fetch(sorted.length / 2)
+    end
+
+    def nearest_rank(values, numerator, denominator)
+      raise "statistics require at least one sample" if values.empty?
+
+      rank = (values.length * numerator + denominator - 1) / denominator
+      values.sort.fetch(rank - 1)
+    end
+  end
+
+  module HeapGate
+    REQUIRED_WORKLOADS = %w[allocationChurn objectArray].freeze
+    REQUIRED_RUNTIME = "poplang"
+    REQUIRED_STAGE = "NativeStableGenerationalConformance"
+    REQUIRED_SAMPLES = 50
+    BUDGET_NUMERATOR = 105
+    BUDGET_DENOMINATOR = 100
+    TIMING_MEASUREMENT = "monotonic wall clock, integer nanoseconds"
+    MEMORY_MEASUREMENT = "maximum resident set, KiB"
+    HOST_PROFILE_FIELDS = %w[
+      targetArchitecture
+      targetOperatingSystem
+      availableParallelism
+      processorIdentity
+    ].freeze
+
+    module_function
+
+    def evaluate(baseline, candidate)
+      failures = []
+      compare_document_contract(baseline, candidate, failures)
+      workload_reports = REQUIRED_WORKLOADS.filter_map do |workload|
+        baseline_result = unique_result(baseline, workload, "baseline", failures)
+        candidate_result = unique_result(candidate, workload, "candidate", failures)
+        next unless baseline_result && candidate_result
+
+        compare_workload(
+          workload,
+          baseline_result,
+          candidate_result,
+          baseline["samples"],
+          candidate["samples"],
+          failures
+        )
+      end
+      {
+        "schemaVersion" => 1,
+        "passed" => failures.empty?,
+        "budgetPercent" => 5,
+        "requiredSamples" => REQUIRED_SAMPLES,
+        "workloads" => workload_reports,
+        "failures" => failures
+      }
+    end
+
+    def compare_document_contract(baseline, candidate, failures)
+      [baseline, candidate].zip(%w[baseline candidate]).each do |document, label|
+        failures << "#{label} schemaVersion must be 3" unless document["schemaVersion"] == 3
+        unless document["samples"].is_a?(Integer) && document["samples"] >= REQUIRED_SAMPLES
+          failures << "#{label} must declare at least #{REQUIRED_SAMPLES} samples"
+        end
+        if document["timingMeasurement"] != TIMING_MEASUREMENT
+          failures << "#{label} has an unsupported timing measurement"
+        end
+        if document["memoryMeasurement"] != MEMORY_MEASUREMENT
+          failures << "#{label} has an unsupported memory measurement"
+        end
+        profile = document["hostProfile"]
+        unless profile.is_a?(Hash) && HOST_PROFILE_FIELDS.all? { |field| profile[field] && profile[field] != "" }
+          failures << "#{label} has an incomplete host profile"
+        end
+      end
+      %w[hostProfile timingMeasurement memoryMeasurement samples].each do |field|
+        next if baseline[field] == candidate[field]
+
+        failures << "baseline and candidate #{field} must match exactly"
+      end
+    end
+
+    def unique_result(document, workload, label, failures)
+      results = Array(document["results"]).select do |result|
+        result["runtime"] == REQUIRED_RUNTIME && result["workload"] == workload
+      end
+      if results.length != 1
+        failures << "#{label} must contain exactly one poplang/#{workload} result"
+        return
+      end
+      results.first
+    end
+
+    def compare_workload(
+      workload,
+      baseline,
+      candidate,
+      baseline_sample_count,
+      candidate_sample_count,
+      failures
+    )
+      validate_result(workload, baseline, baseline_sample_count, "baseline", failures)
+      validate_result(workload, candidate, candidate_sample_count, "candidate", failures)
+      if baseline["collectorStage"] != candidate["collectorStage"]
+        failures << "#{workload} collector stages must match"
+      end
+      if baseline["workloadSourceSha256"] != candidate["workloadSourceSha256"]
+        failures << "#{workload} source digests must match"
+      end
+      if baseline["expectedChecksumSha256"] != candidate["expectedChecksumSha256"]
+        failures << "#{workload} checksum digests must match"
+      end
+
+      baseline_metrics = derived_metrics(baseline)
+      candidate_metrics = derived_metrics(candidate)
+      return unless baseline_metrics && candidate_metrics
+
+      report = { "workload" => workload }
+      {
+        "median" => :median_nanoseconds,
+        "p99" => :p99_nanoseconds,
+        "peak RSS" => :peak_rss_kib
+      }.each do |label, metric|
+        before = baseline_metrics.fetch(metric)
+        after = candidate_metrics.fetch(metric)
+        report["baseline#{camel(metric)}"] = before
+        report["candidate#{camel(metric)}"] = after
+        if exceeds_budget?(before, after)
+          failures << "#{workload} #{label} exceeds the 5% regression budget"
+        end
+      end
+      report
+    end
+
+    def validate_result(workload, result, expected_sample_count, label, failures)
+      if result["collectorStage"] != REQUIRED_STAGE
+        failures << "#{label} #{workload} must use collector stage #{REQUIRED_STAGE}"
+      end
+      unless result["checksumValidated"] == true
+        failures << "#{label} #{workload} must record checksum validation"
+      end
+      expected = REGISTRY.workloads.find { |entry| entry.id == workload }&.expected_output
+      expected_digest = Digest::SHA256.hexdigest(expected.to_s)
+      if result["expectedChecksumSha256"] != expected_digest
+        failures << "#{label} #{workload} has the wrong checksum digest"
+      end
+      unless result["workloadSourceSha256"].to_s.match?(/\A[0-9a-f]{64}\z/)
+        failures << "#{label} #{workload} has an invalid source digest"
+      end
+
+      samples = result["samplesNanoseconds"]
+      memory = result["samplePeakRssKiB"]
+      unless samples.is_a?(Array) && samples.length >= REQUIRED_SAMPLES &&
+             samples.all? { |value| value.is_a?(Integer) && value.positive? }
+        failures << "#{label} #{workload} needs at least #{REQUIRED_SAMPLES} positive timing samples"
+      end
+      if samples.is_a?(Array) && samples.length != expected_sample_count
+        failures << "#{label} #{workload} sample count does not match its document"
+      end
+      unless memory.is_a?(Array) && samples.is_a?(Array) &&
+             memory.length == samples.length &&
+             memory.all? { |value| value.is_a?(Integer) && value.positive? }
+        failures << "#{label} #{workload} needs one positive peak-RSS sample per timing sample"
+      end
+
+      metrics = derived_metrics(result)
+      return unless metrics
+
+      {
+        "medianNanoseconds" => :median_nanoseconds,
+        "p99Nanoseconds" => :p99_nanoseconds,
+        "peakRssKiB" => :peak_rss_kib
+      }.each do |field, metric|
+        next if result[field] == metrics.fetch(metric)
+
+        failures << "#{label} #{workload} #{field} does not match its samples"
+      end
+    end
+
+    def derived_metrics(result)
+      samples = result["samplesNanoseconds"]
+      memory = result["samplePeakRssKiB"]
+      return unless samples.is_a?(Array) && !samples.empty? &&
+                    samples.all? { |value| value.is_a?(Integer) && value.positive? }
+      return unless memory.is_a?(Array) && memory.length == samples.length &&
+                    memory.all? { |value| value.is_a?(Integer) && value.positive? }
+
+      {
+        median_nanoseconds: Statistics.median(samples),
+        p99_nanoseconds: Statistics.nearest_rank(samples, 99, 100),
+        peak_rss_kib: memory.max
+      }
+    end
+
+    def exceeds_budget?(baseline, candidate)
+      candidate * BUDGET_DENOMINATOR > baseline * BUDGET_NUMERATOR
+    end
+
+    def camel(metric)
+      metric.to_s.split("_").map(&:capitalize).join
     end
   end
 
@@ -330,8 +602,9 @@ module PopBenchmark
   end
 
   class Runner
-    def initialize(samples:, warmups:, selected_runtimes:, selected_workloads:)
+    def initialize(samples:, warmups:, selected_runtimes:, selected_workloads:, cpu_affinity: nil)
       @samples, @warmups = samples, warmups
+      @cpu_affinity = cpu_affinity
       @runtimes = filter(REGISTRY.runtimes, selected_runtimes)
       @workloads = filter(REGISTRY.workloads, selected_workloads)
     end
@@ -350,20 +623,23 @@ module PopBenchmark
       end
       measurements = prepared.flat_map do |runtime, workload, command|
         begin
-          @warmups.times { execute(command) }
-          times = @samples.times.map { execute(command) }
-          result(runtime, workload, times)
+          @warmups.times { execute(command, workload) }
+          measurements = @samples.times.map { execute(command, workload) }
+          result(runtime, workload, measurements)
         rescue StandardError => error
           warn "benchmark: skipping #{runtime.id}/#{workload.id}: #{error.message.lines.first.strip}"
           []
         end
       end
       {
-        "schemaVersion" => 2,
+        "schemaVersion" => 3,
         "createdAt" => Time.now.utc.iso8601,
         "samples" => @samples,
         "warmups" => @warmups,
         "timing" => "execution only; provisioning and compilation are excluded",
+        "timingMeasurement" => "monotonic wall clock, integer nanoseconds",
+        "memoryMeasurement" => "maximum resident set, KiB",
+        "hostProfile" => HostProfile.current(cpu_affinity: @cpu_affinity),
         "workloads" => @workloads.map { |workload| { "id" => workload.id, "name" => workload.name, "category" => workload.category, "description" => workload.description } },
         "results" => measurements
       }
@@ -397,14 +673,24 @@ module PopBenchmark
       false
     end
 
-    def execute(command)
-      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      Command.run(*command)
-      Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+    def execute(command, workload)
+      output, measurement = Command.measure(*affinity_command(command))
+      validate_output(output, workload)
+      measurement
     end
 
     def validate_command(command, workload)
-      output = Command.run(*command)
+      output = Command.run(*affinity_command(command))
+      validate_output(output, workload)
+    end
+
+    def affinity_command(command)
+      return command unless @cpu_affinity
+
+      ["taskset", "--cpu-list", @cpu_affinity.to_s, *command]
+    end
+
+    def validate_output(output, workload)
       return if output == workload.expected_output
       return if numeric_checksum(output) == numeric_checksum(workload.expected_output)
 
@@ -420,8 +706,16 @@ module PopBenchmark
       nil
     end
 
-    def result(runtime, workload, times)
-      sorted = times.sort
+    def result(runtime, workload, measurements)
+      measurements = measurements.map do |measurement|
+        next measurement if measurement.is_a?(Measurement)
+
+        Measurement.new((measurement * 1_000_000_000).round, nil)
+      end
+      samples_nanoseconds = measurements.map(&:nanoseconds)
+      samples_seconds = samples_nanoseconds.map { |value| value.fdiv(1_000_000_000) }
+      peak_rss_samples = measurements.map(&:peak_rss_kib)
+      sorted = samples_nanoseconds.sort
       comparable = true
 
       result = {
@@ -430,9 +724,19 @@ module PopBenchmark
         "executionModel" => runtime.mode,
         "workload" => workload.id,
         "workloadName" => workload.name,
-        "samplesSeconds" => times,
-        "medianSeconds" => sorted[times.length / 2],
-        "minimumSeconds" => sorted.first,
+        "samplesNanoseconds" => samples_nanoseconds,
+        "samplesSeconds" => samples_seconds,
+        "medianNanoseconds" => Statistics.median(samples_nanoseconds),
+        "p99Nanoseconds" => Statistics.nearest_rank(samples_nanoseconds, 99, 100),
+        "minimumNanoseconds" => sorted.first,
+        "medianSeconds" => Statistics.median(samples_nanoseconds).fdiv(1_000_000_000),
+        "p99Seconds" => Statistics.nearest_rank(samples_nanoseconds, 99, 100).fdiv(1_000_000_000),
+        "minimumSeconds" => sorted.first.fdiv(1_000_000_000),
+        "samplePeakRssKiB" => peak_rss_samples.compact,
+        "peakRssKiB" => peak_rss_samples.all? ? peak_rss_samples.max : nil,
+        "workloadSourceSha256" => Digest::SHA256.file(source_path(runtime, workload)).hexdigest,
+        "expectedChecksumSha256" => Digest::SHA256.hexdigest(workload.expected_output),
+        "checksumValidated" => true,
         "comparable" => comparable
       }
       if runtime.id == "poplang"
@@ -614,7 +918,8 @@ module PopBenchmark
       when "run" then run(arguments)
       when "batch" then batch(arguments)
       when "render" then render(arguments)
-      else raise "usage: benchmark [list|provision|run|batch|render]"
+      when "heap-gate" then heap_gate(arguments)
+      else raise "usage: benchmark [list|provision|run|batch|render|heap-gate]"
       end
     rescue StandardError => error
       warn "benchmark: #{error.message}"
@@ -641,23 +946,31 @@ module PopBenchmark
     end
 
     def run_options(arguments, html: false)
-      options = { samples: 7, warmups: 2, runtimes: [], workloads: [], output: File.join(RESULT_DIRECTORY, "latest.json") }
+      options = { samples: 7, warmups: 2, runtimes: [], workloads: [], output: File.join(RESULT_DIRECTORY, "latest.json"), cpu_affinity: nil }
       options[:html] = File.join(RESULT_DIRECTORY, "latest.html") if html
       OptionParser.new do |parser|
         parser.on("--samples NUMBER", Integer) { |value| options[:samples] = value }
         parser.on("--warmups NUMBER", Integer) { |value| options[:warmups] = value }
         parser.on("--runtime NAME") { |value| options[:runtimes] << value }
         parser.on("--workload NAME") { |value| options[:workloads] << value }
+        parser.on("--cpu-affinity CPU", Integer) { |value| options[:cpu_affinity] = value }
         parser.on("--output PATH") { |value| options[:output] = value }
         parser.on("--html PATH") { |value| options[:html] = value } if html
       end.parse!(arguments)
       raise "samples must be positive" unless options[:samples].positive?
       raise "warmups cannot be negative" if options[:warmups].negative?
+      raise "CPU affinity cannot be negative" if options[:cpu_affinity]&.negative?
       options
     end
 
     def write_results(options)
-      document = Runner.new(samples: options[:samples], warmups: options[:warmups], selected_runtimes: options[:runtimes], selected_workloads: options[:workloads]).run
+      document = Runner.new(
+        samples: options[:samples],
+        warmups: options[:warmups],
+        selected_runtimes: options[:runtimes],
+        selected_workloads: options[:workloads],
+        cpu_affinity: options[:cpu_affinity]
+      ).run
       FileUtils.mkdir_p(File.dirname(options[:output]))
       File.write(options[:output], JSON.pretty_generate(document) + "\n")
       puts options[:output]
@@ -671,6 +984,31 @@ module PopBenchmark
       FileUtils.mkdir_p(File.dirname(options[:output]))
       File.write(options[:output], Report.render(JSON.parse(File.read(options[:input]))))
       puts options[:output]
+    end
+
+    def heap_gate(arguments)
+      options = {}
+      OptionParser.new do |parser|
+        parser.on("--baseline PATH") { |value| options[:baseline] = value }
+        parser.on("--candidate PATH") { |value| options[:candidate] = value }
+        parser.on("--output PATH") { |value| options[:output] = value }
+      end.parse!(arguments)
+      raise "heap-gate requires --baseline RESULTS.json" unless options[:baseline]
+      raise "heap-gate requires --candidate RESULTS.json" unless options[:candidate]
+
+      baseline = JSON.parse(File.read(options[:baseline]))
+      candidate = JSON.parse(File.read(options[:candidate]))
+      report = HeapGate.evaluate(baseline, candidate)
+      rendered = JSON.pretty_generate(report) + "\n"
+      if options[:output]
+        FileUtils.mkdir_p(File.dirname(options[:output]))
+        File.write(options[:output], rendered)
+        puts options[:output]
+      else
+        puts rendered
+      end
+      exit 1 unless report.fetch("passed")
+      report
     end
   end
 end

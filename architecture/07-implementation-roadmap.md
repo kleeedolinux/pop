@@ -124,6 +124,12 @@ not table or runtime-name lookup.
   inline one-word payload slots, constant-time homogeneous-array
   classification, and deterministic arena-indexed token metadata without
   duplicate per-entry tokens;
+- monomorphic pages that own contiguous physical payload words, page-shared
+  precise layouts, and compact token-indexed placement entries containing only
+  page and offset, with size/domain/layout derived from the page; initialized
+  objects and arrays construct their final unpublished payload directly in the
+  page, and native checked array/field reads cache exact page spans whose final
+  placement-revision check rejects relocation or reclamation;
 - backend-private scalar replacement for non-escaping scalar arrays, including
   read-only loop-local instances, with exact shape/bounds traps, loop safe
   points, and managed, escaping, or mutated-loop negative coverage;
@@ -210,6 +216,28 @@ semantics without C undefined behavior, and is invoked through `pop transpile
   namespaces, independently locked TLABs, and concurrent scheduler-scoped minor
   evacuation; replacing the ABI 1 stable facade's process-global lock remains
   separate native integration work;
+- ADR 0099's atomic paired native-heap regression gate requires compatible
+  50-sample `allocationChurn` and `objectArray` evidence and rejects checksum,
+  median, nearest-rank P99, or peak-RSS regressions before heap changes close;
+- the ADR 0100/0104 allocation-layout path for fixed compiler sites, atomic
+  self-recursive closure environments, constant-size homogeneous/strided
+  collection maps, closed native iteration results, page-shared layouts, and
+  constant-time membership;
+- ADR 0101 defines the remaining ABI 1 stable-token allocation fast path:
+  scheduler/mutator-bound TLAB leases, plain local pointer bumps, complete
+  unpublished initialization records, checked flush boundaries, out-of-order
+  disjoint token-range publication, and collection-handshake refusal until the
+  local buffer and TLAB top are published;
+- ADR 0102 defines additive ABI 1.21 adapters for two verified adjacent native
+  heap-operation pairs while leaving canonical MIR separate, backend-neutral,
+  and observably equivalent; negative lowering and paired heap-gate evidence
+  are required before the fused path closes;
+- ADR 0103 selects the mutator-overlapped production collector and separately
+  built ABI 2 native facade, including versioned card refinement, SATB buffers,
+  active-stack watermarks, writable-root reload, scheduler/task-root binding,
+  bounded stress, and stale-token rejection;
+- ADR 0104 defines additive ABI 1.22 cyclic-site and native-iteration
+  constructors plus closed constant-size layout families;
 - the first public-library slices authorized by the section 22 implementation
   plan, without pulling optional official ecosystems into `Pop.Standard`;
 - optimization based on profiling and benchmarks.

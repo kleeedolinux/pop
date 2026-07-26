@@ -2,8 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock};
 
 use pop_runtime_interface::{
-    AllocationClass, ManagedReference, ObjectAllocationRequest, ObjectMap, RuntimeAdapter,
-    RuntimeTypeId,
+    ManagedReference, ObjectAllocationRequest, ObjectMap, RuntimeAdapter, RuntimeTypeId,
 };
 
 use super::model::{
@@ -43,7 +42,7 @@ fn allocate_capability(runtime_type: RuntimeTypeId, capability: CodecCapability)
     };
     let Ok(reference) = runtime.allocate_object(&ObjectAllocationRequest::new(
         runtime_type,
-        AllocationClass::Mature,
+        crate::allocation::native_default_allocation_class(),
         object_map,
     )) else {
         return 0;

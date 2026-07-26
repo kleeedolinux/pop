@@ -540,7 +540,7 @@ fn nominal_reference_metadata_rejects_a_missing_interface_witness_definition() {
         .map(|offset| interfaces + offset)
         .expect("class inventory");
     let mut tampered = text;
-    tampered.replace_range(interfaces..classes + 1, "\"interfaces\":[]");
+    tampered.replace_range(interfaces..=classes, "\"interfaces\":[]");
     assert!(matches!(
         decode_reference_metadata(tampered.as_bytes()),
         Err(ReferenceMetadataDecodeError::InvalidNominalMetadata)

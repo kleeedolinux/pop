@@ -1966,7 +1966,15 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
         });
     }
     if let Some(values) = text.strip_prefix("tupleMake ") {
-        return Ok(MirInstructionKind::TupleMake(parse_values(values, line)?));
+        let parts = values.splitn(3, ' ').collect::<Vec<_>>();
+        let [site, object_map, elements] = parts.as_slice() else {
+            return Err(error(line, "tuple allocation descriptor"));
+        };
+        return Ok(MirInstructionKind::TupleMake {
+            allocation_site: AllocationSiteId::from_raw(parse_hash(site, "site#", line)?),
+            elements: parse_values(elements, line)?,
+            object_map: parse_object_map(object_map, line)?,
+        });
     }
     if let Some(rest) = text.strip_prefix("tupleGet ") {
         let (index, tuple) = rest
@@ -2131,36 +2139,42 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
         });
     }
     if let Some(rest) = text.strip_prefix("resultMake ") {
-        let parts: Vec<_> = rest.splitn(3, ' ').collect();
-        if parts.len() != 3 {
+        let parts: Vec<_> = rest.splitn(5, ' ').collect();
+        if parts.len() != 5 {
             return Err(error(line, "malformed Result construction"));
         }
         return Ok(MirInstructionKind::ResultMake {
             result: parse_builtin_type_id(parts[0], line)?,
             case: ResultCaseId::from_raw(parse_hash(parts[1], "resultCase#", line)?),
-            arguments: parse_values(parts[2], line)?,
+            allocation_site: AllocationSiteId::from_raw(parse_hash(parts[2], "site#", line)?),
+            object_map: parse_object_map(parts[3], line)?,
+            arguments: parse_values(parts[4], line)?,
         });
     }
     if let Some(rest) = text.strip_prefix("iterationMake ") {
-        let parts: Vec<_> = rest.splitn(3, ' ').collect();
-        if parts.len() != 3 {
+        let parts: Vec<_> = rest.splitn(5, ' ').collect();
+        if parts.len() != 5 {
             return Err(error(line, "malformed Iteration construction"));
         }
         return Ok(MirInstructionKind::IterationMake {
             iteration: parse_builtin_type_id(parts[0], line)?,
             case: IterationCaseId::from_raw(parse_hash(parts[1], "iterationCase#", line)?),
-            arguments: parse_values(parts[2], line)?,
+            allocation_site: AllocationSiteId::from_raw(parse_hash(parts[2], "site#", line)?),
+            object_map: parse_object_map(parts[3], line)?,
+            arguments: parse_values(parts[4], line)?,
         });
     }
     if let Some(rest) = text.strip_prefix("errorMake ") {
-        let parts: Vec<_> = rest.splitn(3, ' ').collect();
-        if parts.len() != 3 {
+        let parts: Vec<_> = rest.splitn(5, ' ').collect();
+        if parts.len() != 5 {
             return Err(error(line, "malformed error construction"));
         }
         return Ok(MirInstructionKind::ErrorMake {
             error: ErrorId::from_raw(parse_prefixed(parts[0], 'e', line)?),
             case: ErrorCaseId::from_raw(parse_hash(parts[1], "errorCase#", line)?),
-            arguments: parse_values(parts[2], line)?,
+            allocation_site: AllocationSiteId::from_raw(parse_hash(parts[2], "site#", line)?),
+            object_map: parse_object_map(parts[3], line)?,
+            arguments: parse_values(parts[4], line)?,
         });
     }
     if let Some(value) = text.strip_prefix("resultIsOk ") {
@@ -2701,14 +2715,15 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
     }
     if let Some(rest) = text.strip_prefix("captureCell.allocate ") {
         let parts: Vec<_> = rest.split_whitespace().collect();
-        if parts.len() != 4 {
+        if parts.len() != 5 {
             return Err(error(line, "capture cell allocation"));
         }
         return Ok(MirInstructionKind::CaptureCellAllocate {
             binding: BindingId::from_raw(parse_named_prefix(parts[0], "bind", line)?),
-            initial: ValueId::from_raw(parse_prefixed(parts[1], 'v', line)?),
-            value_type: TypeId::from_raw(parse_prefixed(parts[2], 't', line)?),
-            object_map: parse_object_map(parts[3], line)?,
+            allocation_site: AllocationSiteId::from_raw(parse_hash(parts[1], "site#", line)?),
+            initial: ValueId::from_raw(parse_prefixed(parts[2], 'v', line)?),
+            value_type: TypeId::from_raw(parse_prefixed(parts[3], 't', line)?),
+            object_map: parse_object_map(parts[4], line)?,
         });
     }
     if let Some(rest) = text.strip_prefix("captureCell.load ") {
@@ -2733,13 +2748,14 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
             })
             .ok_or_else(|| error(line, "closure environment allocation"))?;
         let parts: Vec<_> = head.split_whitespace().collect();
-        if parts.len() != 3 {
+        if parts.len() != 4 {
             return Err(error(line, "closure environment header"));
         }
         return Ok(MirInstructionKind::ClosureEnvironmentAllocate {
             owner: SymbolId::from_raw(parse_prefixed(parts[0], 's', line)?),
             function: NestedFunctionId::from_raw(parse_named_prefix(parts[1], "nf", line)?),
-            object_map: parse_object_map(parts[2], line)?,
+            allocation_site: AllocationSiteId::from_raw(parse_hash(parts[2], "site#", line)?),
+            object_map: parse_object_map(parts[3], line)?,
             captures: parse_closure_captures(captures, line)?,
         });
     }
@@ -2791,10 +2807,16 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
         });
     }
     if let Some(rest) = text.strip_prefix("unionMake s") {
-        let mut parts = rest.splitn(3, ' ');
+        let mut parts = rest.splitn(5, ' ');
         return Ok(MirInstructionKind::UnionMake {
             union: SymbolId::from_raw(parse_u32(required(&mut parts, line)?, line)?),
             case: UnionCaseId::from_raw(parse_hash(required(&mut parts, line)?, "case#", line)?),
+            allocation_site: AllocationSiteId::from_raw(parse_hash(
+                required(&mut parts, line)?,
+                "site#",
+                line,
+            )?),
+            object_map: parse_object_map(required(&mut parts, line)?, line)?,
             arguments: parse_values(required(&mut parts, line)?, line)?,
         });
     }
@@ -2805,14 +2827,20 @@ fn parse_operation(text: &str, line: usize) -> Result<MirInstructionKind, MirPar
         let (head, fields) = rest
             .split_once(" {")
             .ok_or_else(|| error(line, "class fields"))?;
-        let (class, object_map) = head
-            .split_once(' ')
-            .ok_or_else(|| error(line, "class allocation map"))?;
+        let mut head = head.split_whitespace();
+        let class = required(&mut head, line)?;
+        let allocation_site =
+            AllocationSiteId::from_raw(parse_hash(required(&mut head, line)?, "site#", line)?);
+        let object_map = required(&mut head, line)?;
+        if head.next().is_some() {
+            return Err(error(line, "class allocation map"));
+        }
         let fields = fields
             .strip_suffix('}')
             .ok_or_else(|| error(line, "class fields"))?;
         return Ok(MirInstructionKind::ClassMake {
             class: ClassId::from_raw(parse_u32(class, line)?),
+            allocation_site,
             fields: parse_field_values(fields, line)?,
             object_map: parse_object_map(object_map, line)?,
         });
@@ -3067,17 +3095,16 @@ fn parse_call_operation(text: &str, line: usize) -> Result<MirInstructionKind, M
     })
 }
 
+type ParsedCallLifetimeContract = (
+    Vec<ValueId>,
+    Option<CallableLifetimeSummary>,
+    Option<MirCallViewResult>,
+);
+
 fn parse_call_lifetime_contract(
     text: &str,
     line: usize,
-) -> Result<
-    (
-        Vec<ValueId>,
-        Option<CallableLifetimeSummary>,
-        Option<MirCallViewResult>,
-    ),
-    MirParseError,
-> {
+) -> Result<ParsedCallLifetimeContract, MirParseError> {
     let Some((arguments, contract)) = text.split_once(" lifetimeSummary(") else {
         return parse_values(text, line).map(|arguments| (arguments, None, None));
     };
@@ -3449,10 +3476,17 @@ fn parse_record_operation(text: &str, line: usize) -> Result<MirInstructionKind,
         .ok_or_else(|| error(line, "record fields"))?;
     let mut head = head.split_whitespace();
     let record = SymbolId::from_raw(parse_u32(required(&mut head, line)?, line)?);
-    let base = head
-        .next()
+    let allocation_site =
+        AllocationSiteId::from_raw(parse_hash(required(&mut head, line)?, "site#", line)?);
+    let base = update
+        .then(|| required(&mut head, line))
+        .transpose()?
         .map(|value| parse_prefixed(value, 'v', line).map(ValueId::from_raw))
         .transpose()?;
+    let object_map = parse_object_map(required(&mut head, line)?, line)?;
+    if head.next().is_some() {
+        return Err(error(line, "record allocation descriptor"));
+    }
     let fields = comma_parts(fields)
         .map(|field| {
             let (field, value) = field
@@ -3467,10 +3501,17 @@ fn parse_record_operation(text: &str, line: usize) -> Result<MirInstructionKind,
     match base {
         Some(base) if update => Ok(MirInstructionKind::RecordUpdate {
             record,
+            allocation_site,
             base,
             fields,
+            object_map,
         }),
-        None if !update => Ok(MirInstructionKind::RecordMake { record, fields }),
+        None if !update => Ok(MirInstructionKind::RecordMake {
+            record,
+            allocation_site,
+            fields,
+            object_map,
+        }),
         _ => Err(error(line, "record base mismatch")),
     }
 }

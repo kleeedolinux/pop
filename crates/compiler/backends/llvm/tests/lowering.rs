@@ -489,6 +489,92 @@ fn llvm_contains_c_unwind_at_one_balanced_foreign_boundary() {
 }
 
 #[test]
+fn relocating_c_unwind_reloads_roots_before_cleanup_resumes_managed_code() {
+    let ffi = BubbleId::from_raw(9);
+    let source = SourceFile::new(
+        FileId::from_raw(0),
+        "src/relocatingUnwind.pop",
+        "namespace Native\n\
+         @Ffi.Foreign(\"native_may_unwind\", abi = \"CUnwind\")\n\
+         internal function mayUnwind(value: Ffi.C.Int): Ffi.C.Int\n\
+         end\n\
+         internal function cleanup(retained: String)\n\
+             print(retained)\n\
+         end\n\
+         internal function invoke(value: Ffi.C.Int, retained: String): Ffi.C.Int\n\
+             defer\n\
+                 cleanup(retained)\n\
+             end\n\
+             return mayUnwind(value)\n\
+         end\n",
+    )
+    .expect("source");
+    let front_end = analyze_bubble(
+        FrontEndBubbleInput::new(
+            BubbleId::from_raw(0),
+            NamespaceId::from_raw(0),
+            vec![ffi],
+            vec![FrontEndModule::new(ModuleId::from_raw(0), source)],
+        )
+        .with_ffi_dependency(ffi),
+    );
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end.hir().expect("HIR");
+    let invoke = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "invoke")
+        .expect("invoke function")
+        .symbol();
+    let mir = lower_hir_bubble(hir, front_end.types()).expect("verified MIR");
+    let target = TargetSpec::builder("x86_64-unknown-linux-gnu")
+        .pointer_width(PointerWidth::Bits64)
+        .endianness(Endianness::Little)
+        .operating_system(OperatingSystem::Linux)
+        .capability(TargetCapability::PreciseStackMaps)
+        .capability(TargetCapability::RelocatingNursery)
+        .capability(TargetCapability::Exceptions)
+        .build()
+        .expect("relocating exception-capable target");
+    let module = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target,
+        LlvmLoweringOptions::default()
+            .with_runtime_profile(RuntimeProfile::ProductionGenerational)
+            .with_gc_poll_interval(NonZeroU32::MIN),
+    )
+    .expect("relocating CUnwind lowering");
+    let mut text = module.to_string();
+    assert!(text.contains("_unwind_reload = getelementptr"), "{text}");
+    assert!(text.contains("_after_foreign_unwind_"), "{text}");
+    write!(
+        text,
+        "\ndefine i32 @main() {{\n\
+         entry:\n\
+           %binding = call i64 @pop_rt_attach_managed_thread(i32 1)\n\
+           %token = call i64 @pop_rt_allocate_array(i64 0, i1 false)\n\
+           %ignored = call i64 @pop_b0_s{}(i64 41, i64 %token)\n\
+           ret i32 99\n\
+         }}\n",
+        invoke.raw()
+    )
+    .expect("append native entry");
+
+    let result = link_with_forced_relocation_unwind_runtime_and_run(&text, "unwind-relocation");
+    assert_eq!(
+        result.status.code(),
+        Some(42),
+        "unwind cleanup resumed with a stale root: {}\n{text}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
 fn llvm_executes_read_only_and_optional_read_only_foreign_pointers() {
     let ffi = BubbleId::from_raw(9);
     let source = SourceFile::new(
@@ -1898,7 +1984,7 @@ fn specialized_generic_data_lowers_to_concrete_native_ir() {
     )
     .expect("LLVM lowering")
     .to_string();
-    assert!(text.contains("pop_rt_allocate_initialized_object"));
+    assert!(text.contains("pop_rt_allocate_initialized_object_at_site"));
     assert!(text.contains("pop_rt_field_set"));
     assert!(text.contains("switch i64"));
     let input = std::env::temp_dir().join("pop-backend-llvm-generics.ll");
@@ -1936,10 +2022,18 @@ end\n",
     );
     let text = module.to_string();
     assert_eq!(
-        text.matches("call i64 @pop_rt_allocate_initialized_object")
+        text.matches("call i64 @pop_rt_allocate_initialized_object_at_site")
             .count(),
         1,
         "{text}"
+    );
+    assert!(
+        text.contains("@pop_allocation_site_0_"),
+        "allocation-site descriptor must be emitted once: {text}"
+    );
+    assert!(
+        !text.contains("_object_map = alloca"),
+        "pointer maps must not be rebuilt on the stack: {text}"
     );
     assert!(!text.contains("call i8 @pop_rt_field_set"), "{text}");
 
@@ -1948,6 +2042,7 @@ end\n",
 }
 
 #[test]
+#[allow(clippy::too_many_lines, clippy::similar_names)]
 fn checked_nominal_cast_executes_with_stable_identity_across_linked_bubbles() {
     let producer_bubble = BubbleId::from_raw(41);
     let producer_source = SourceFile::new(
@@ -2299,7 +2394,11 @@ fn fixed_pack_calls_and_multiple_assignment_execute_natively() {
     .expect("LLVM lowering");
     let text = module.to_string();
     assert!(
-        text.contains("call i64 @pop_rt_allocate_mapped_object"),
+        text.contains("call i64 @pop_rt_allocate_initialized_object_at_site"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("call i64 @pop_rt_allocate_mapped_object"),
         "{text}"
     );
     assert!(text.contains("@pop_rt_field_get"), "{text}");
@@ -3053,6 +3152,15 @@ private function main(): Int\n\
     return total\n\
 end\n",
     );
+    let text = module.to_string();
+    assert!(
+        text.contains("call i64 @pop_rt_iteration_make"),
+        "builtin iteration results need one closed atomic layout entry: {text}"
+    );
+    assert!(
+        !text.contains("call i64 @pop_rt_allocate_mapped_object(i64 2"),
+        "builtin iteration must not rebuild its pointer map: {text}"
+    );
     let result = link_with_runtime_and_run(&module, "generalized-iteration");
     assert_eq!(
         result.status.code(),
@@ -3668,6 +3776,7 @@ fn emitted_llvm_executes_sequence_index_last_and_reduction() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn emitted_llvm_executes_lazy_sequence_bounds_and_composition() {
     let module = native_modules(&[
         (
@@ -3905,6 +4014,181 @@ end\n",
         text.contains("call i1 @llvm.expect.i1")
             && text.contains("declare i8 @pop_rt_gc_safe_point(i32, ptr, i64) cold nounwind"),
         "LLVM must see the runtime poll as an unlikely cold path:\n{text}"
+    );
+}
+
+#[test]
+fn loop_root_publications_use_activation_owned_stack_storage() {
+    let module = native_module(
+        "namespace Main\n\
+class Box\n\
+    value: Int\n\
+    function Box.new(value: Int): Box\n\
+        return Box { value = value }\n\
+    end\n\
+end\n\
+private function main(): Int\n\
+    local values = Array.create<<Box>>(4, Box.new(0))\n\
+    local index = 1\n\
+    repeat\n\
+        values[index] = Box.new(index)\n\
+        index = index + 1\n\
+    until index == 5\n\
+    local box = Array.get(values, 4)\n\
+    return box.value\n\
+end\n",
+    );
+    let text = module.to_string();
+    let function = text
+        .split("define internal i64 @pop_b0_s1()")
+        .nth(1)
+        .expect("main function")
+        .split("\ndefine ")
+        .next()
+        .expect("main body");
+    let loop_body = function.split("\nb1:").nth(1).expect("loop body");
+
+    assert!(
+        !loop_body.contains(" = alloca "),
+        "loop execution must not grow the native stack:\n{function}"
+    );
+}
+
+#[test]
+fn adjacent_managed_heap_pairs_use_typed_native_fusion() {
+    let module = native_module(
+        "namespace Main\n\
+class Box\n\
+    value: Int\n\
+    function Box.new(value: Int): Box\n\
+        return Box { value = value }\n\
+    end\n\
+end\n\
+private function main(): Int\n\
+    local values = Array.create<<Box>>(4, Box.new(0))\n\
+    local index = 1\n\
+    repeat\n\
+        values[index] = Box { value = index }\n\
+        index = index + 1\n\
+    until index == 5\n\
+    local box = Array.get(values, 4)\n\
+    return box.value\n\
+end\n",
+    );
+    let text = module.to_string();
+    let function = text
+        .split("define internal i64 @pop_b0_s1()")
+        .nth(1)
+        .and_then(|text| text.split("\n}\n").next())
+        .expect("lowered retained-object function");
+
+    assert!(
+        function.contains("call i64 @pop_rt_allocate_initialized_object_at_site_and_store_array"),
+        "adjacent construction/store must use ABI 1.21 fusion:\n{function}"
+    );
+    assert!(
+        function.contains("call i8 @pop_rt_array_get_object_field_checked"),
+        "adjacent checked array/field read must use ABI 1.21 fusion:\n{function}"
+    );
+}
+
+#[test]
+fn optimized_trivial_constructor_enables_typed_adjacent_store_fusion() {
+    let module = native_optimized_module(
+        "namespace Main\n\
+class Box\n\
+    value: Int\n\
+    function Box.new(value: Int): Box\n\
+        return Box { value = value }\n\
+    end\n\
+end\n\
+private function main(): Int\n\
+    local values = Array.create<<Box>>(2, Box.new(0))\n\
+    local index = 1\n\
+    local box = Box.new(42)\n\
+    values[index] = box\n\
+    local loaded = Array.get(values, index)\n\
+    return loaded.value\n\
+end\n",
+    );
+    let text = module.to_string();
+    let function = text
+        .split("define internal i64 @pop_b0_s1()")
+        .nth(1)
+        .and_then(|text| text.split("\n}\n").next())
+        .expect("optimized retained-object function");
+
+    assert!(
+        function.contains("call i64 @pop_rt_allocate_initialized_object_at_site_and_store_array"),
+        "verified constructor inlining must expose the adjacent allocation/store pair:\n{function}"
+    );
+    assert!(
+        !function.contains("call i64 @pop_b0_method_0(i64 %v"),
+        "the optimized caller must not retain the trivial constructor call:\n{function}"
+    );
+}
+
+#[test]
+fn additional_managed_uses_keep_adjacent_heap_operations_separate() {
+    let module = native_module(
+        "namespace Main\n\
+class Box\n\
+    value: Int\n\
+end\n\
+private function main(): Int\n\
+    local values = Array.create<<Box>>(2, Box { value = 0 })\n\
+    local box = Box { value = 42 }\n\
+    values[1] = box\n\
+    local loaded = Array.get(values, 1)\n\
+    return box.value + loaded.value\n\
+end\n",
+    );
+    let text = module.to_string();
+    let function = text
+        .split("define internal i64 @pop_b0_s1()")
+        .nth(1)
+        .and_then(|text| text.split("\n}\n").next())
+        .expect("non-fused retained-object function");
+
+    assert!(
+        !function.contains("call i64 @pop_rt_allocate_initialized_object_at_site_and_store_array"),
+        "an allocation result with another use cannot be fused into its store:\n{function}"
+    );
+    assert!(
+        function.contains("call i64 @pop_rt_allocate_initialized_object_at_site")
+            && function.contains("call i8 @pop_rt_array_set"),
+        "ordinary allocation and checked store calls must remain:\n{function}"
+    );
+}
+
+#[test]
+fn repeated_array_result_use_keeps_checked_read_and_field_access_separate() {
+    let module = native_module(
+        "namespace Main\n\
+class Box\n\
+    value: Int\n\
+end\n\
+private function main(): Int\n\
+    local values = Array.create<<Box>>(1, Box { value = 21 })\n\
+    local box = Array.get(values, 1)\n\
+    return box.value + box.value\n\
+end\n",
+    );
+    let text = module.to_string();
+    let function = text
+        .split("define internal i64 @pop_b0_s1()")
+        .nth(1)
+        .and_then(|text| text.split("\n}\n").next())
+        .unwrap_or_else(|| panic!("non-fused checked-read function:\n{text}"));
+
+    assert!(
+        !function.contains("call i8 @pop_rt_array_get_object_field_checked"),
+        "a checked array result with multiple uses cannot be fused:\n{function}"
+    );
+    assert!(
+        function.contains("call i8 @pop_rt_array_get_checked")
+            && function.contains("call i64 @pop_rt_field_get"),
+        "ordinary checked read and field access calls must remain:\n{function}"
     );
 }
 
@@ -4554,6 +4838,15 @@ private function main(arguments: Array<String>): Int\n\
     return counter(42)\n\
 end\n",
     );
+    let text = module.to_string();
+    assert!(
+        text.contains("@pop_allocation_site_"),
+        "escaping closure environments need immutable site descriptors: {text}"
+    );
+    assert!(
+        !text.contains("call i64 @pop_rt_allocate_mapped_object"),
+        "escaping closure environments must not rebuild pointer maps: {text}"
+    );
     let result = link_with_runtime_and_run(&module, "mutating-closure");
     assert_eq!(
         result.status.code(),
@@ -4589,8 +4882,12 @@ end\n",
     );
     let text = module.to_string();
     assert!(
-        text.contains("call i64 @pop_rt_allocate_mapped_object(i64 1"),
-        "direct function values must use the same managed callable representation as closures: {text}"
+        text.contains("call i64 @pop_rt_allocate_initialized_self_referential_object_at_site"),
+        "recursive closure environments need atomic static-site allocation: {text}"
+    );
+    assert!(
+        !text.contains("call i64 @pop_rt_allocate_mapped_object(i64 2"),
+        "recursive closure environments must not rebuild pointer maps: {text}"
     );
     let result = link_with_runtime_and_run(&module, "recursive-closure");
     assert_eq!(
@@ -4623,6 +4920,15 @@ private function main(arguments: Array<String>): Int\n\
         return 1\n\
     end\n\
 end\n",
+    );
+    let text = module.to_string();
+    assert!(
+        text.matches("@pop_allocation_site_").count() >= 4,
+        "records, record updates, and tuples need immutable site descriptors: {text}"
+    );
+    assert!(
+        !text.contains("call i64 @pop_rt_allocate_mapped_object"),
+        "fixed aggregates must not rebuild native pointer maps: {text}"
     );
     let result = link_with_runtime_and_run(&module, "aggregate-values");
     assert_eq!(
@@ -4980,7 +5286,18 @@ fn native_module(source_text: &str) -> pop_backend_llvm::LlvmModule {
     native_modules(&[("src/main.pop", source_text)])
 }
 
+fn native_optimized_module(source_text: &str) -> pop_backend_llvm::LlvmModule {
+    native_modules_with_optimization(&[("src/main.pop", source_text)], true)
+}
+
 fn native_modules(sources: &[(&str, &str)]) -> pop_backend_llvm::LlvmModule {
+    native_modules_with_optimization(sources, false)
+}
+
+fn native_modules_with_optimization(
+    sources: &[(&str, &str)],
+    optimize: bool,
+) -> pop_backend_llvm::LlvmModule {
     let modules = sources
         .iter()
         .enumerate()
@@ -5011,6 +5328,11 @@ fn native_modules(sources: &[(&str, &str)]) -> pop_backend_llvm::LlvmModule {
         .expect("entry")
         .symbol();
     let mir = lower_hir_bubble(hir, front_end.types()).expect("verified MIR");
+    let mir = if optimize {
+        optimize_mir(mir, front_end.types()).expect("optimized MIR")
+    } else {
+        mir
+    };
     lower_mir_to_llvm_ir(
         &mir,
         front_end.types(),
@@ -5468,6 +5790,7 @@ fn link_llvm_with_c_fixture_and_runtime(llvm: &str, fixture: &str, name: &str) -
     result
 }
 
+#[allow(clippy::too_many_lines)]
 fn link_with_forced_relocation_runtime_and_run(llvm: &str, name: &str) -> Output {
     let input = std::env::temp_dir().join(format!("pop-backend-llvm-{name}.ll"));
     let runtime = std::env::temp_dir().join(format!("pop-backend-llvm-{name}-runtime.c"));
@@ -5577,6 +5900,85 @@ fn link_with_forced_relocation_runtime_and_run(llvm: &str, name: &str) -> Output
     let result = Command::new(&executable)
         .output()
         .expect("forced-relocation executable runs");
+    let _ = fs::remove_file(input);
+    let _ = fs::remove_file(runtime);
+    let _ = fs::remove_file(executable);
+    result
+}
+
+fn link_with_forced_relocation_unwind_runtime_and_run(llvm: &str, name: &str) -> Output {
+    let input = std::env::temp_dir().join(format!("pop-backend-llvm-{name}.ll"));
+    let runtime = std::env::temp_dir().join(format!("pop-backend-llvm-{name}-runtime.cc"));
+    let executable = std::env::temp_dir().join(format!("pop-backend-llvm-{name}"));
+    fs::write(&input, llvm).expect("write forced-relocation unwind LLVM input");
+    fs::write(
+        &runtime,
+        concat!(
+            "#include <cstdint>\n",
+            "#include <cstdlib>\n",
+            "#include <unwind.h>\n",
+            "static std::uint64_t current_token = 41;\n",
+            "static bool attached;\n",
+            "static bool foreign_active;\n",
+            "static bool cleanup_checked;\n",
+            "static _Unwind_Exception forced_exception;\n",
+            "static void discard_exception(_Unwind_Reason_Code, _Unwind_Exception *) {}\n",
+            "static _Unwind_Reason_Code stop_unwind(int, _Unwind_Action actions, std::uint64_t, _Unwind_Exception *, _Unwind_Context *, void *) {\n",
+            "  if ((actions & _UA_END_OF_STACK) != 0) std::_Exit(44); return _URC_NO_REASON;\n",
+            "}\n",
+            "extern \"C\" std::int32_t native_may_unwind(std::int32_t) {\n",
+            "  forced_exception.exception_class = 0x504f50554e574e44ULL;\n",
+            "  forced_exception.exception_cleanup = discard_exception;\n",
+            "  _Unwind_ForcedUnwind(&forced_exception, stop_unwind, nullptr); std::abort();\n",
+            "}\n",
+            "extern \"C\" std::uint8_t pop_rt_supports_abi(std::uint16_t major, std::uint16_t minor) {\n",
+            "  return major == 2 && minor == 0;\n",
+            "}\n",
+            "extern \"C\" std::uint64_t pop_rt_allocate_array(std::uint64_t, std::uint8_t) {\n",
+            "  current_token = 41; return current_token;\n",
+            "}\n",
+            "extern \"C\" std::uint64_t pop_rt_attach_managed_thread(std::uint32_t scheduler) {\n",
+            "  if (scheduler == 0 || attached) std::abort(); attached = true; return 1;\n",
+            "}\n",
+            "extern \"C\" std::uint8_t pop_rt_gc_safe_point_v2(std::uint32_t, std::uint64_t *roots, std::uint64_t count) {\n",
+            "  if (!attached || foreign_active || count != 1 || roots[0] != current_token) std::abort();\n",
+            "  current_token += 100; roots[0] = current_token; return 1;\n",
+            "}\n",
+            "extern \"C\" std::uint64_t pop_rt_enter_foreign(std::uint32_t, std::uint64_t *roots, std::uint64_t count, std::uint8_t mode) {\n",
+            "  if (!attached || foreign_active || mode > 1 || count != 1 || roots[0] != current_token) std::abort();\n",
+            "  current_token += 100; roots[0] = current_token; foreign_active = true; return 1;\n",
+            "}\n",
+            "extern \"C\" std::uint8_t pop_rt_leave_foreign(std::uint64_t transition, std::uint64_t *roots, std::uint64_t count) {\n",
+            "  if (transition != 1 || !foreign_active || count != 1 || roots[0] != current_token) std::abort();\n",
+            "  current_token += 100; roots[0] = current_token; foreign_active = false; return 1;\n",
+            "}\n",
+            "extern \"C\" void pop_std_print_string(std::uint64_t token) {\n",
+            "  if (token != current_token || foreign_active) std::abort(); cleanup_checked = true;\n",
+            "}\n",
+            "extern \"C\" void pop_rt_continue_unwind() {\n",
+            "  std::_Exit(cleanup_checked ? 42 : 43);\n",
+            "}\n",
+            "extern \"C\" void pop_rt_trap() { std::abort(); }\n",
+        ),
+    )
+    .expect("write forced-relocation unwind runtime");
+    let link = Command::new("clang++")
+        .args(["-O3", "-Werror", "-Wno-override-module"])
+        .arg(&input)
+        .arg(&runtime)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .expect("clang++ must be installed");
+    assert!(
+        link.status.success(),
+        "clang++ rejected forced-relocation unwind LLVM: {}\n{}",
+        String::from_utf8_lossy(&link.stderr),
+        llvm
+    );
+    let result = Command::new(&executable)
+        .output()
+        .expect("forced-relocation unwind executable runs");
     let _ = fs::remove_file(input);
     let _ = fs::remove_file(runtime);
     let _ = fs::remove_file(executable);
@@ -5953,6 +6355,7 @@ fn typed_result_failure_runs_managed_cleanup_in_native_execution() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn generated_codec_record_uses_closed_native_event_calls() {
     let source = SourceFile::new(
         FileId::from_raw(0),
@@ -6163,8 +6566,8 @@ fn generated_codec_closed_graph_verifies_symmetric_static_lowering() {
         for instruction in mir
             .functions()
             .iter()
-            .flat_map(|function| function.blocks())
-            .flat_map(|block| block.instructions())
+            .flat_map(pop_mir::MirFunction::blocks)
+            .flat_map(pop_mir::MirBlock::instructions)
         {
             match instruction.kind() {
                 MirInstructionKind::CodecEncode { adapter: found, .. }

@@ -9,7 +9,16 @@ pub enum ObjectMapError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObjectMap {
     slot_count: u32,
+    reference_pattern: ReferencePattern,
     reference_slots: Vec<ObjectSlot>,
+    reference_membership: Vec<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReferencePattern {
+    Sparse,
+    Homogeneous,
+    Strided { first: u32, stride: u32 },
 }
 
 impl ObjectMap {
@@ -18,8 +27,36 @@ impl ObjectMap {
     pub const fn scalar(slot_count: u32) -> Self {
         Self {
             slot_count,
+            reference_pattern: ReferencePattern::Sparse,
             reference_slots: Vec::new(),
+            reference_membership: Vec::new(),
         }
+    }
+
+    /// Constructs the canonical constant-size description for a homogeneous
+    /// managed-reference payload.
+    #[must_use]
+    pub const fn homogeneous_references(slot_count: u32) -> Self {
+        Self {
+            slot_count,
+            reference_pattern: ReferencePattern::Homogeneous,
+            reference_slots: Vec::new(),
+            reference_membership: Vec::new(),
+        }
+    }
+
+    /// Constructs a constant-size map for one repeated slot position.
+    #[must_use]
+    pub const fn strided_references(slot_count: u32, first: u32, stride: u32) -> Option<Self> {
+        if stride == 0 || first >= slot_count {
+            return None;
+        }
+        Some(Self {
+            slot_count,
+            reference_pattern: ReferencePattern::Strided { first, stride },
+            reference_slots: Vec::new(),
+            reference_membership: Vec::new(),
+        })
     }
 
     /// Constructs a canonical logical object pointer map.
@@ -45,9 +82,20 @@ impl ObjectMap {
         {
             return Err(ObjectMapError::SlotOutOfBounds { slot, slot_count });
         }
+        let membership_words = reference_slots
+            .last()
+            .map_or(0, |slot| slot.raw() as usize / u64::BITS as usize + 1);
+        let mut reference_membership = vec![0; membership_words];
+        for slot in &reference_slots {
+            let index = slot.raw() as usize;
+            reference_membership[index / u64::BITS as usize] |=
+                1_u64 << (index % u64::BITS as usize);
+        }
         Ok(Self {
             slot_count,
+            reference_pattern: ReferencePattern::Sparse,
             reference_slots,
+            reference_membership,
         })
     }
 
@@ -62,8 +110,51 @@ impl ObjectMap {
     }
 
     #[must_use]
+    pub fn has_reference_slots(&self) -> bool {
+        !matches!(self.reference_pattern, ReferencePattern::Sparse)
+            || !self.reference_slots.is_empty()
+    }
+
+    #[must_use]
+    pub fn reference_slot_count(&self) -> usize {
+        match self.reference_pattern {
+            ReferencePattern::Sparse => self.reference_slots.len(),
+            ReferencePattern::Homogeneous => self.slot_count as usize,
+            ReferencePattern::Strided { first, stride } => {
+                ((self.slot_count - 1 - first) / stride + 1) as usize
+            }
+        }
+    }
+
+    pub fn iter_reference_slots(&self) -> impl Iterator<Item = ObjectSlot> + '_ {
+        let pattern = self.reference_pattern;
+        (0..self.slot_count)
+            .filter(move |slot| match pattern {
+                ReferencePattern::Sparse => false,
+                ReferencePattern::Homogeneous => true,
+                ReferencePattern::Strided { first, stride } => {
+                    *slot >= first && (*slot - first).is_multiple_of(stride)
+                }
+            })
+            .map(ObjectSlot::new)
+            .chain(self.reference_slots.iter().copied())
+    }
+
+    #[must_use]
     pub fn is_reference_slot(&self, slot: ObjectSlot) -> bool {
-        self.reference_slots.binary_search(&slot).is_ok()
+        match self.reference_pattern {
+            ReferencePattern::Homogeneous => return slot.raw() < self.slot_count,
+            ReferencePattern::Strided { first, stride } => {
+                return slot.raw() < self.slot_count
+                    && slot.raw() >= first
+                    && (slot.raw() - first).is_multiple_of(stride);
+            }
+            ReferencePattern::Sparse => {}
+        }
+        let index = slot.raw() as usize;
+        self.reference_membership
+            .get(index / u64::BITS as usize)
+            .is_some_and(|word| word & (1_u64 << (index % u64::BITS as usize)) != 0)
     }
 }
 

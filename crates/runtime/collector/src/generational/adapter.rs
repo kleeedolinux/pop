@@ -5,18 +5,238 @@ use std::sync::Arc;
 
 use pop_runtime_interface::{
     AllocationClass, ArrayAllocationRequest, ArrayElementMap, FfiBytesBorrow, FfiBytesBorrowId,
-    GarbageCollectorContract, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot,
-    PinHandle, RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure, SafePointOutcome,
+    GarbageCollectorContract, ManagedReference, ObjectAllocationRequest, ObjectMap, PinHandle,
+    RootHandle, RootPublication, RuntimeAdapter, RuntimeFailure, SafePointOutcome,
     TableAllocationRequest, WriteBarrier,
 };
 
-use crate::heap::BootstrapRuntime;
+use crate::heap::{AllocationKind, BootstrapRuntime};
 use crate::relocation::CollectorGeneration;
 
 use super::heap::GenerationalRuntime;
 use super::workers::CardRefinementTask;
+use super::{PendingMatureObject, ReservedMatureLease, ReservedMatureObject};
 
 impl GenerationalRuntime {
+    fn selected_object_request(
+        &self,
+        request: &ObjectAllocationRequest,
+    ) -> ObjectAllocationRequest {
+        if request.allocation_class() == AllocationClass::NurseryEligible
+            && request
+                .allocation_site()
+                .is_some_and(|site| self.pretenuring.should_pretenure(site))
+        {
+            request.with_allocation_class(AllocationClass::Mature)
+        } else {
+            request.clone()
+        }
+    }
+
+    /// Reserves a bounded stable-token TLAB slice for one pointer-free site.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-mature or reference-bearing layout, zero capacity, token
+    /// exhaustion, or memory admission failure without publishing an object.
+    pub fn reserve_pointer_free_mature_objects(
+        &mut self,
+        request: &ObjectAllocationRequest,
+        count: usize,
+    ) -> Result<ReservedMatureLease, RuntimeFailure> {
+        if request.allocation_class() != AllocationClass::Mature
+            || request.object_map().slot_count() == 0
+            || request.object_map().has_reference_slots()
+            || count == 0
+        {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        let object_map = request.shared_object_map();
+        self.prepare_mature_batch(request.type_id(), &object_map, count)?;
+        let identities = self.nursery.reserve_mature_identities(count)?;
+        let reservations = self.allocation.reserve_pointer_free_mature_objects(
+            identities,
+            request.type_id(),
+            object_map.clone(),
+            self.scheduler,
+        )?;
+        let first_reference = reservations
+            .first()
+            .map(ReservedMatureObject::reference)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        let last_reference = reservations
+            .last()
+            .and_then(ReservedMatureObject::last_reference)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        let Some(validation) =
+            self.allocation
+                .direct_reference_lease(first_reference, last_reference, self.scheduler)
+        else {
+            self.allocation
+                .cancel_reserved_tail(first_reference, last_reference);
+            return Err(RuntimeFailure::runtime_invariant());
+        };
+        self.memory
+            .observe_committed(self.allocation.committed_bytes());
+        Ok(ReservedMatureLease::new(
+            request.type_id(),
+            self.scheduler,
+            object_map,
+            reservations,
+            validation,
+        ))
+    }
+
+    fn prepare_mature_batch(
+        &mut self,
+        type_id: pop_runtime_interface::RuntimeTypeId,
+        object_map: &Arc<ObjectMap>,
+        count: usize,
+    ) -> Result<(), RuntimeFailure> {
+        let requested_slots = usize::try_from(object_map.slot_count())
+            .map_err(|_| BootstrapRuntime::out_of_memory(count, usize::MAX))?;
+        let mut requirement = self.allocation.mature_batch_requirement_shared(
+            type_id,
+            object_map,
+            self.scheduler,
+            count,
+        )?;
+        let mut committed_after = self
+            .allocation
+            .committed_bytes()
+            .saturating_add(requirement.additional_committed_bytes);
+        if self.memory.pressure_for(committed_after) {
+            self.memory.record_pressure(committed_after);
+            self.request_major_collection();
+            if self.major_cycle_active() {
+                let budget = self.memory.assist_work_budget();
+                let (statistics, completed_work) = self.advance_major_with_budget(budget)?;
+                self.memory.record_assist(completed_work);
+                if statistics.is_some() {
+                    self.update_memory_target();
+                } else {
+                    self.memory
+                        .observe_committed(self.allocation.committed_bytes());
+                }
+            }
+            requirement = self.allocation.mature_batch_requirement_shared(
+                type_id,
+                object_map,
+                self.scheduler,
+                count,
+            )?;
+            committed_after = self
+                .allocation
+                .committed_bytes()
+                .saturating_add(requirement.additional_committed_bytes);
+        }
+        if !self.memory.admits(committed_after) {
+            self.memory.record_out_of_memory();
+            return Err(BootstrapRuntime::out_of_memory(count, requested_slots));
+        }
+        let _ = requirement.object_bytes;
+        Ok(())
+    }
+
+    /// Publishes complete objects consumed from the caller's bound TLAB.
+    ///
+    /// # Errors
+    ///
+    /// Rejects scheduler mismatch, stale reservations, or duplicate tokens.
+    pub fn publish_reserved_mature_objects(
+        &mut self,
+        pending: Vec<PendingMatureObject>,
+    ) -> Result<(), RuntimeFailure> {
+        for pending in &pending {
+            if pending.scheduler != self.scheduler
+                || self.nursery.contains(pending.reference)
+                || self.allocation.placement(pending.reference).is_none()
+            {
+                return Err(RuntimeFailure::runtime_invariant());
+            }
+        }
+        for pending in pending {
+            let reference = self.nursery.publish_reserved_mature(pending)?;
+            self.allocation.publish_direct_reference(reference);
+            self.mark_new_allocation(reference);
+        }
+        self.memory
+            .observe_committed(self.allocation.committed_bytes());
+        Ok(())
+    }
+
+    /// Publishes every completed lease entry and cancels all unused capacity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed page ranges, scheduler mismatch, stale reservations,
+    /// duplicate tokens, or partial publication state.
+    pub fn publish_reserved_mature_lease(
+        &mut self,
+        lease: ReservedMatureLease,
+    ) -> Result<(), RuntimeFailure> {
+        let mut publication = lease.into_publication()?;
+        let Some((first_reserved, last_reserved)) = publication.bounds() else {
+            return Err(RuntimeFailure::runtime_invariant());
+        };
+        if publication.scheduler != self.scheduler
+            || !self
+                .allocation
+                .contains_placement_range(first_reserved, last_reserved)
+            || !publication.initialized_page_ranges_are_valid()
+        {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        let initialized_bounds = publication.initialized_bounds();
+        let unused = publication.cancel_unused_tail();
+        if let Some((first, last)) = initialized_bounds {
+            self.allocation.publish_direct_range(first, last);
+            self.mark_new_allocation_range(first, last);
+        }
+        self.memory
+            .observe_committed(self.allocation.committed_bytes());
+        if let Some((first, last)) = unused {
+            if self.nursery.contains(first) || self.nursery.contains(last) {
+                return Err(RuntimeFailure::runtime_invariant());
+            }
+            self.allocation.cancel_reserved_tail(first, last);
+        }
+        if publication.initialized_count() != 0 {
+            self.deferred_mature.push(publication);
+        }
+        Ok(())
+    }
+
+    pub fn cancel_reserved_objects(&mut self, references: Vec<ManagedReference>) {
+        if references.is_empty() {
+            return;
+        }
+        for reference in references {
+            if !self.nursery.contains(reference) {
+                self.allocation.remove_without_page_reclamation(reference);
+            }
+        }
+        self.allocation.reclaim_empty_pages_after_sweep();
+    }
+
+    pub(crate) fn materialize_deferred_mature(&mut self) -> Result<(), RuntimeFailure> {
+        if self.deferred_mature.is_empty() {
+            return Ok(());
+        }
+        let deferred = std::mem::take(&mut self.deferred_mature);
+        for publication in deferred {
+            let pending = publication.into_pending()?;
+            let references = pending
+                .iter()
+                .map(PendingMatureObject::reference)
+                .collect::<Vec<_>>();
+            self.allocation.materialize_direct_placements(&references)?;
+            self.nursery
+                .publish_reserved_mature_batch(pending.into_iter())?;
+        }
+        Ok(())
+    }
+
     /// Allocates one object with its complete typed payload before publication.
     ///
     /// # Errors
@@ -27,19 +247,111 @@ impl GenerationalRuntime {
         request: &ObjectAllocationRequest,
         values: &[u64],
     ) -> Result<ManagedReference, RuntimeFailure> {
+        let request = self.selected_object_request(request);
+        let object_map = request.shared_object_map();
         self.prepare_allocation(
             request.type_id(),
             request.allocation_class(),
-            request.object_map(),
+            &object_map,
             true,
         )?;
-        let reference = self.nursery.allocate_object_initialized(request, values)?;
-        self.finish_allocation(
+        let reference = self.nursery.fresh_reference()?;
+        let placement = self.allocation.place_shared(
             reference,
             request.type_id(),
             request.allocation_class(),
-            request.object_map(),
-        )
+            object_map,
+            self.scheduler,
+            Some(AllocationKind::Object),
+        )?;
+        let (payload, start, page_object_map) = match placement.into_page_storage() {
+            Ok(storage) => storage,
+            Err(error) => {
+                self.allocation.remove(reference);
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.nursery.publish_object_initialized_on_page(
+            reference,
+            &request,
+            values,
+            page_object_map,
+            payload,
+            start,
+        ) {
+            self.allocation.remove(reference);
+            return Err(error);
+        }
+        self.complete_allocation(reference)
+    }
+
+    /// Allocates one atomically published object whose selected reference
+    /// slots point at the new object itself.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-reference, duplicate, out-of-bounds, or nonzero bootstrap
+    /// self slots before exposing the new token.
+    pub fn allocate_object_initialized_self_referential(
+        &mut self,
+        request: &ObjectAllocationRequest,
+        values: &[u64],
+        self_slots: &[pop_runtime_interface::ObjectSlot],
+    ) -> Result<ManagedReference, RuntimeFailure> {
+        if self_slots.windows(2).any(|pair| pair[0] >= pair[1])
+            || self_slots.iter().any(|slot| {
+                !request.object_map().is_reference_slot(*slot)
+                    || values.get(slot.raw() as usize).copied() != Some(0)
+            })
+        {
+            return Err(RuntimeFailure::runtime_invariant());
+        }
+        let request = self.selected_object_request(request);
+        let object_map = request.shared_object_map();
+        self.prepare_allocation(
+            request.type_id(),
+            request.allocation_class(),
+            &object_map,
+            true,
+        )?;
+        let reference = self.nursery.fresh_reference()?;
+        let placement = self.allocation.place_shared(
+            reference,
+            request.type_id(),
+            request.allocation_class(),
+            object_map,
+            self.scheduler,
+            Some(AllocationKind::Object),
+        )?;
+        let (payload, start, page_object_map) = match placement.into_page_storage() {
+            Ok(storage) => storage,
+            Err(error) => {
+                self.allocation.remove(reference);
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.nursery.publish_object_initialized_on_page(
+            reference,
+            &request,
+            values,
+            page_object_map,
+            payload,
+            start,
+        ) {
+            self.allocation.remove(reference);
+            return Err(error);
+        }
+        for slot in self_slots {
+            if let Err(error) = self
+                .nursery
+                .store_reference(reference, *slot, Some(reference))
+            {
+                self.allocation.remove(reference);
+                self.nursery.discard_unpublished(reference)?;
+                return Err(error);
+            }
+        }
+        self.complete_allocation(reference)
     }
 
     /// Allocates one array with its final scalar payload in a single pass.
@@ -54,40 +366,67 @@ impl GenerationalRuntime {
         request: &ArrayAllocationRequest,
         value: u64,
     ) -> Result<ManagedReference, RuntimeFailure> {
-        let object_map = self.array_object_map(request)?;
+        if value != 0
+            && self
+                .deferred_mature
+                .iter()
+                .any(|publication| publication.contains(ManagedReference::new(value)))
+        {
+            self.materialize_deferred_mature()?;
+        }
+        let object_map = Self::array_object_map(request);
+        let object_map = Arc::new(object_map);
         self.prepare_allocation(
             request.type_id(),
             request.allocation_class(),
             &object_map,
             true,
         )?;
-        let reference = self.nursery.allocate_array_filled(
-            request.type_id(),
-            request.allocation_class(),
-            request.element_map(),
-            object_map.clone(),
-            value,
-        )?;
-        self.finish_allocation(
+        let reference = self.nursery.fresh_reference()?;
+        let placement = self.allocation.place_shared(
             reference,
             request.type_id(),
             request.allocation_class(),
-            &object_map,
-        )
+            object_map,
+            self.scheduler,
+            Some(AllocationKind::Array(request.element_map())),
+        )?;
+        let (payload, start, page_object_map) = match placement.into_page_storage() {
+            Ok(storage) => storage,
+            Err(error) => {
+                self.allocation.remove(reference);
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.nursery.publish_array_filled_on_page(
+            reference,
+            request,
+            page_object_map,
+            payload,
+            start,
+            value,
+        ) {
+            self.allocation.remove(reference);
+            return Err(error);
+        }
+        self.complete_allocation(reference)
     }
 
     fn prepare_allocation(
         &mut self,
         type_id: pop_runtime_interface::RuntimeTypeId,
         class: pop_runtime_interface::AllocationClass,
-        object_map: &ObjectMap,
+        object_map: &Arc<ObjectMap>,
         allow_assist: bool,
     ) -> Result<(), RuntimeFailure> {
         let requested_slots = usize::try_from(object_map.slot_count())
             .map_err(|_| BootstrapRuntime::out_of_memory(1, usize::MAX))?;
-        let mut requirement =
-            self.allocation
-                .placement_requirement(type_id, class, object_map, self.scheduler)?;
+        let mut requirement = self.allocation.placement_requirement_shared(
+            type_id,
+            class,
+            object_map,
+            self.scheduler,
+        )?;
         let mut committed_after = self
             .allocation
             .committed_bytes()
@@ -110,7 +449,7 @@ impl GenerationalRuntime {
                         .observe_committed(self.allocation.committed_bytes());
                 }
             }
-            requirement = self.allocation.placement_requirement(
+            requirement = self.allocation.placement_requirement_shared(
                 type_id,
                 class,
                 object_map,
@@ -137,54 +476,82 @@ impl GenerationalRuntime {
         reference: ManagedReference,
         type_id: pop_runtime_interface::RuntimeTypeId,
         class: pop_runtime_interface::AllocationClass,
-        object_map: &ObjectMap,
+        object_map: Arc<ObjectMap>,
+        kind: AllocationKind,
     ) -> Result<ManagedReference, RuntimeFailure> {
-        if let Err(error) =
-            self.allocation
-                .place(reference, type_id, class, object_map, self.scheduler)
-        {
+        let placement = match self.allocation.place_shared(
+            reference,
+            type_id,
+            class,
+            object_map,
+            self.scheduler,
+            Some(kind),
+        ) {
+            Ok(placement) => placement,
+            Err(error) => {
+                self.nursery.discard_unpublished(reference)?;
+                return Err(error);
+            }
+        };
+        let object = self
+            .nursery
+            .objects
+            .get_mut(&reference)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if let Err(error) = super::allocation::AllocationInfrastructure::bind_object_at(
+            placement,
+            &mut object.allocation,
+        ) {
+            self.allocation.remove(reference);
             self.nursery.discard_unpublished(reference)?;
             return Err(error);
         }
+        self.complete_allocation(reference)
+    }
+
+    fn complete_allocation(
+        &mut self,
+        reference: ManagedReference,
+    ) -> Result<ManagedReference, RuntimeFailure> {
         let object = self
             .nursery
             .objects
             .get_mut(&reference)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
         object.ownership = crate::ownership::ObjectOwnership::SchedulerLocal(self.scheduler);
+        self.allocation.publish_direct_reference(reference);
         self.mark_new_allocation(reference);
         self.memory
             .observe_committed(self.allocation.committed_bytes());
         Ok(reference)
     }
 
-    fn array_object_map(
-        &mut self,
-        request: &ArrayAllocationRequest,
-    ) -> Result<ObjectMap, RuntimeFailure> {
-        let references = match request.element_map() {
-            ArrayElementMap::Scalar => Vec::new(),
+    fn array_object_map(request: &ArrayAllocationRequest) -> ObjectMap {
+        match request.element_map() {
+            ArrayElementMap::Scalar => ObjectMap::scalar(request.length()),
             ArrayElementMap::ManagedReference => {
-                let length = usize::try_from(request.length()).map_err(|_| {
-                    self.memory.record_out_of_memory();
-                    BootstrapRuntime::out_of_memory(1, usize::MAX)
-                })?;
-                let mut references = Vec::new();
-                references.try_reserve_exact(length).map_err(|_| {
-                    self.memory.record_out_of_memory();
-                    BootstrapRuntime::out_of_memory(1, length)
-                })?;
-                references.extend((0..request.length()).map(ObjectSlot::new));
-                references
+                ObjectMap::homogeneous_references(request.length())
             }
-        };
-        ObjectMap::new(request.length(), references)
-            .map_err(|_| RuntimeFailure::runtime_invariant())
+        }
     }
 
-    fn refine_cards_for_minor(&mut self) -> Result<(), RuntimeFailure> {
+    fn refine_cards_for_minor(&mut self) -> Result<bool, RuntimeFailure> {
         if self.workers.is_none() || self.nursery.dirty_cards.is_empty() {
-            return Ok(());
+            self.pending_card_refinement = None;
+            return Ok(true);
+        }
+        if self.production_concurrent
+            && let Some(pending) = self.pending_card_refinement.take()
+        {
+            let refined = self
+                .workers
+                .as_mut()
+                .ok_or_else(RuntimeFailure::runtime_invariant)?
+                .complete_card_refinement(pending.count)?;
+            if pending.mutation_version == self.reference_mutation_version {
+                self.nursery.install_refined_cards(refined)?;
+                return Ok(true);
+            }
         }
         let young = Arc::new(
             self.nursery
@@ -222,36 +589,53 @@ impl GenerationalRuntime {
                 })
             })
             .collect::<Result<Vec<_>, RuntimeFailure>>()?;
-        let refined = self
+        let workers = self
             .workers
             .as_mut()
-            .ok_or_else(RuntimeFailure::runtime_invariant)?
-            .refine_cards(tasks, &young)?;
-        self.nursery.install_refined_cards(refined)
+            .ok_or_else(RuntimeFailure::runtime_invariant)?;
+        if self.production_concurrent {
+            let count = workers.submit_card_refinement(tasks, &young)?;
+            self.pending_card_refinement = Some(super::heap::PendingCardRefinement {
+                count,
+                mutation_version: self.reference_mutation_version,
+            });
+            Ok(false)
+        } else {
+            let refined = workers.refine_cards(tasks, &young)?;
+            self.nursery.install_refined_cards(refined)?;
+            Ok(true)
+        }
     }
 }
 
 impl RuntimeAdapter for GenerationalRuntime {
     fn contract(&self) -> GarbageCollectorContract {
-        GarbageCollectorContract::relocation_conformance_stage2()
+        if self.production_concurrent {
+            GarbageCollectorContract::pop_v1()
+        } else {
+            GarbageCollectorContract::relocation_conformance_stage2()
+        }
     }
 
     fn allocate_object(
         &mut self,
         request: &ObjectAllocationRequest,
     ) -> Result<ManagedReference, RuntimeFailure> {
+        let request = self.selected_object_request(request);
+        let object_map = request.shared_object_map();
         self.prepare_allocation(
             request.type_id(),
             request.allocation_class(),
-            request.object_map(),
+            &object_map,
             true,
         )?;
-        let reference = self.nursery.allocate_object(request)?;
+        let reference = self.nursery.allocate_object(&request)?;
         self.finish_allocation(
             reference,
             request.type_id(),
             request.allocation_class(),
-            request.object_map(),
+            object_map,
+            AllocationKind::Object,
         )
     }
 
@@ -259,7 +643,8 @@ impl RuntimeAdapter for GenerationalRuntime {
         &mut self,
         request: &ArrayAllocationRequest,
     ) -> Result<ManagedReference, RuntimeFailure> {
-        let object_map = self.array_object_map(request)?;
+        let object_map = Self::array_object_map(request);
+        let object_map = Arc::new(object_map);
         self.prepare_allocation(
             request.type_id(),
             request.allocation_class(),
@@ -271,7 +656,8 @@ impl RuntimeAdapter for GenerationalRuntime {
             reference,
             request.type_id(),
             request.allocation_class(),
-            &object_map,
+            object_map,
+            AllocationKind::Array(request.element_map()),
         )
     }
 
@@ -279,10 +665,11 @@ impl RuntimeAdapter for GenerationalRuntime {
         &mut self,
         request: &TableAllocationRequest,
     ) -> Result<ManagedReference, RuntimeFailure> {
+        let object_map = Arc::new(request.object_map().clone());
         self.prepare_allocation(
             request.type_id(),
             request.allocation_class(),
-            request.object_map(),
+            &object_map,
             true,
         )?;
         let reference = self.nursery.allocate_table(request)?;
@@ -290,7 +677,8 @@ impl RuntimeAdapter for GenerationalRuntime {
             reference,
             request.type_id(),
             request.allocation_class(),
-            request.object_map(),
+            object_map,
+            AllocationKind::Table,
         )
     }
 
@@ -341,6 +729,13 @@ impl RuntimeAdapter for GenerationalRuntime {
     }
 
     fn retain_root(&mut self, reference: ManagedReference) -> Result<RootHandle, RuntimeFailure> {
+        if self
+            .deferred_mature
+            .iter()
+            .any(|publication| publication.contains(reference))
+        {
+            self.materialize_deferred_mature()?;
+        }
         if matches!(
             self.ownership(reference),
             Some(crate::ownership::ObjectOwnership::Isolated(_))
@@ -364,6 +759,13 @@ impl RuntimeAdapter for GenerationalRuntime {
     }
 
     fn pin(&mut self, reference: ManagedReference) -> Result<PinHandle, RuntimeFailure> {
+        if self
+            .deferred_mature
+            .iter()
+            .any(|publication| publication.contains(reference))
+        {
+            self.materialize_deferred_mature()?;
+        }
         if matches!(
             self.ownership(reference),
             Some(crate::ownership::ObjectOwnership::Isolated(_))
@@ -398,6 +800,13 @@ impl RuntimeAdapter for GenerationalRuntime {
         if !already_pinned {
             self.allocation
                 .move_to_pinned(reference, type_id, &object_map)?;
+            let object = self
+                .nursery
+                .objects
+                .get_mut(&reference)
+                .ok_or_else(RuntimeFailure::runtime_invariant)?;
+            self.allocation
+                .bind_object(reference, &mut object.allocation)?;
         }
         let pin = self.nursery.pin(reference)?;
         if let Err(error) = self.pinning.register(pin, reference) {
@@ -427,6 +836,14 @@ impl RuntimeAdapter for GenerationalRuntime {
         let servicing_minor = self.minor_requested.contains(&self.scheduler)
             && !self.major_cycle_active()
             && self.active_major_collection_epoch().is_none();
+        let deferred_root = roots.managed_references().any(|reference| {
+            self.deferred_mature
+                .iter()
+                .any(|publication| publication.contains(reference))
+        });
+        if servicing_minor || self.major_requested || self.major_cycle_active() || deferred_root {
+            self.materialize_deferred_mature()?;
+        }
         let identities_before: BTreeMap<_, _> = if servicing_minor {
             self.nursery
                 .objects
@@ -436,8 +853,25 @@ impl RuntimeAdapter for GenerationalRuntime {
         } else {
             BTreeMap::new()
         };
+        let sampled_sites_before: BTreeMap<_, _> = if servicing_minor {
+            self.nursery
+                .objects
+                .values()
+                .filter(|object| {
+                    matches!(object.generation, CollectorGeneration::Nursery { .. })
+                        && object.ownership
+                            == crate::ObjectOwnership::SchedulerLocal(self.scheduler)
+                })
+                .filter_map(|object| object.allocation.site.map(|site| (object.identity, site)))
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
         if servicing_minor {
-            self.refine_cards_for_minor()?;
+            if !self.refine_cards_for_minor()? {
+                return Ok(SafePointOutcome::no_collection());
+            }
+            self.allocation.invalidate_all_direct_accesses();
             self.nursery.request_minor_collection_for(self.scheduler);
             self.minor_requested.remove(&self.scheduler);
         }
@@ -448,6 +882,22 @@ impl RuntimeAdapter for GenerationalRuntime {
                 &self.nursery.objects,
                 self.scheduler,
             )?;
+            self.allocation
+                .bind_all_payloads(&mut self.nursery.objects)?;
+            let mut sampled = BTreeMap::<_, usize>::new();
+            for site in sampled_sites_before.values().copied() {
+                *sampled.entry(site).or_default() += 1;
+            }
+            let mut survived = BTreeMap::<_, usize>::new();
+            for object in self.nursery.objects.values() {
+                if let Some(site) = sampled_sites_before.get(&object.identity) {
+                    *survived.entry(*site).or_default() += 1;
+                }
+            }
+            for (site, count) in sampled {
+                self.pretenuring
+                    .observe(site, count, survived.get(&site).copied().unwrap_or(0));
+            }
             self.update_memory_target();
         }
         if self.major_requested && !self.major_cycle_active() {
@@ -468,6 +918,14 @@ impl RuntimeAdapter for GenerationalRuntime {
     }
 
     fn write_barrier(&mut self, barrier: WriteBarrier) -> Result<(), RuntimeFailure> {
+        if self.deferred_mature.iter().any(|publication| {
+            publication.contains(barrier.owner())
+                || barrier
+                    .value()
+                    .is_some_and(|reference| publication.contains(reference))
+        }) {
+            self.materialize_deferred_mature()?;
+        }
         self.ensure_mutable(barrier.owner())?;
         self.validate_ownership_edge(barrier.owner(), barrier.value())?;
         self.nursery.write_barrier(barrier)?;

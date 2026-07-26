@@ -1,7 +1,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use pop_runtime_interface::{ManagedReference, RootSlot, SafePointId};
+use pop_runtime_collector::GenerationalRuntime;
+use pop_runtime_interface::{
+    AllocationClass, ManagedReference, ObjectAllocationRequest, ObjectMap, RootPublication,
+    RootSlot, RuntimeAdapter, RuntimeTypeId, SafePointId, StackMap,
+};
 use pop_runtime_native::{
     NativeCompilerTask, NativeScheduler, NativeTaskFrame, NativeTaskFrameError,
     SchedulerConfiguration, SchedulerTaskContext, SchedulerTaskFrame, SchedulerTaskMobility,
@@ -44,6 +48,60 @@ fn compiler_frame_publishes_and_installs_exact_relocated_root_slots() {
         task.frame().slot(3),
         Err(NativeTaskFrameError::UnknownSlot(3))
     );
+}
+
+#[test]
+fn abi_two_compiler_coroutine_frame_reloads_a_forced_relocated_root() {
+    let scheduler = pop_runtime_interface::SchedulerId::new(1);
+    let mut runtime = GenerationalRuntime::new();
+    let original = runtime
+        .allocate_object(&ObjectAllocationRequest::new(
+            RuntimeTypeId::new(91),
+            AllocationClass::NurseryEligible,
+            ObjectMap::scalar(0),
+        ))
+        .expect("nursery object");
+    let frame = NativeTaskFrame::new(
+        vec![0, original.raw()],
+        SafePointId::new(12),
+        vec![RootSlot::new(1)],
+    )
+    .expect("verified compiler frame");
+    let mut task = NativeCompilerTask::new(
+        frame,
+        |_: &mut NativeTaskFrame, _: &SchedulerTaskContext| SchedulerTaskPoll::Complete,
+    );
+    let publication = task.publish_frame_roots().expect("publish coroutine root");
+    let retained = runtime
+        .retain_task_frame_roots(scheduler, &publication)
+        .expect("retain suspended coroutine frame");
+
+    runtime.request_minor_collection();
+    let mut no_stack_roots = RootPublication::new(
+        StackMap::new(SafePointId::new(13), Vec::new()).expect("empty stack map"),
+        Vec::new(),
+    )
+    .expect("empty root publication");
+    assert!(
+        runtime
+            .safe_point(&mut no_stack_roots)
+            .expect("forced nursery relocation")
+            .collection()
+            .is_some()
+    );
+    assert!(
+        !runtime.contains(original),
+        "the physical pre-suspension token must become stale"
+    );
+
+    let restored = runtime
+        .restore_task_frame_roots(retained, scheduler, task.frame().stack_map())
+        .expect("restore relocated coroutine roots");
+    task.restore_frame_roots(restored)
+        .expect("install relocated compiler-frame token");
+    let relocated = ManagedReference::new(task.frame().slot(1).expect("restored root slot"));
+    assert_ne!(relocated, original);
+    assert!(runtime.contains(relocated));
 }
 
 #[test]

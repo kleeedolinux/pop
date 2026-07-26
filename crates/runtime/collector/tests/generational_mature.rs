@@ -1,10 +1,11 @@
 use pop_runtime_collector::{
     AllocationInfrastructureConfig, GenerationalMemoryConfig, GenerationalRuntime,
-    MajorCollectorConfig, MajorCyclePhase,
+    MajorCollectorConfig, MajorCyclePhase, MutatorExecutionState,
 };
 use pop_runtime_interface::{
-    AllocationClass, ManagedReference, ObjectAllocationRequest, ObjectMap, ObjectSlot,
-    RootPublication, RootSlot, RuntimeAdapter, RuntimeTypeId, SafePointId, StackMap,
+    AllocationClass, ArrayAllocationRequest, ArrayElementMap, ManagedReference,
+    ObjectAllocationRequest, ObjectMap, ObjectSlot, RootPublication, RootSlot, RuntimeAdapter,
+    RuntimeTypeId, SafePointId, StackMap,
 };
 
 fn object(slots: u32, references: &[u32]) -> ObjectAllocationRequest {
@@ -77,6 +78,28 @@ fn mature_marking_preserves_rooted_cycles_and_sweeps_after_release() {
 }
 
 #[test]
+fn page_backed_scalar_words_never_become_conservative_roots() {
+    let mut runtime = GenerationalRuntime::new();
+    let target = runtime.allocate_object(&object(0, &[])).expect("target");
+    let scalar_owner = runtime
+        .allocate_object(&object(1, &[]))
+        .expect("scalar owner");
+    runtime
+        .store_scalar(scalar_owner, ObjectSlot::new(0), target.raw())
+        .expect("scalar resembling a managed reference");
+    let root = runtime.retain_root(scalar_owner).expect("scalar root");
+    let mut roots = no_stack_roots(40);
+
+    assert!(runtime.payload_is_page_backed(scalar_owner));
+    runtime.request_major_collection();
+    finish_major(&mut runtime, &mut roots);
+
+    assert!(runtime.contains(scalar_owner));
+    assert!(!runtime.contains(target));
+    runtime.release_root(root).expect("release scalar root");
+}
+
+#[test]
 fn satb_overwrite_keeps_the_snapshot_target_alive_for_the_active_cycle() {
     let mut runtime = GenerationalRuntime::new();
     let parent = runtime.allocate_object(&object(1, &[0])).expect("parent");
@@ -101,6 +124,43 @@ fn satb_overwrite_keeps_the_snapshot_target_alive_for_the_active_cycle() {
     assert!(!runtime.contains(child));
     assert!(runtime.contains(parent));
     runtime.release_root(root).expect("release root");
+}
+
+#[test]
+fn range_fill_barrier_preserves_every_distinct_snapshot_target() {
+    let mut runtime = GenerationalRuntime::new();
+    let first = runtime.allocate_object(&object(0, &[])).expect("first");
+    let second = runtime.allocate_object(&object(0, &[])).expect("second");
+    let array = runtime
+        .allocate_array(&ArrayAllocationRequest::new(
+            RuntimeTypeId::new(42),
+            AllocationClass::Mature,
+            2,
+            ArrayElementMap::ManagedReference,
+        ))
+        .expect("managed array");
+    runtime
+        .store_array_value(array, ObjectSlot::new(0), first.raw())
+        .expect("first edge");
+    runtime
+        .store_array_value(array, ObjectSlot::new(1), second.raw())
+        .expect("second edge");
+    let root = runtime.retain_root(array).expect("array root");
+    let mut roots = no_stack_roots(41);
+
+    runtime
+        .start_major_collection(&roots)
+        .expect("start snapshot");
+    runtime.fill_array_value(array, 0).expect("range overwrite");
+    finish_major(&mut runtime, &mut roots);
+
+    assert!(runtime.contains(first));
+    assert!(runtime.contains(second));
+    runtime.request_major_collection();
+    finish_major(&mut runtime, &mut roots);
+    assert!(!runtime.contains(first));
+    assert!(!runtime.contains(second));
+    runtime.release_root(root).expect("release array root");
 }
 
 #[test]
@@ -371,4 +431,42 @@ fn mature_allocations_during_lazy_sweep_are_live_for_the_active_cycle() {
     runtime.request_major_collection();
     finish_major(&mut runtime, &mut roots);
     assert!(!runtime.contains(allocated));
+}
+
+#[test]
+fn each_registered_mutator_buffers_a_bounded_satb_snapshot_before_mark_work() {
+    let mut runtime = GenerationalRuntime::with_config(
+        MajorCollectorConfig::new(1).with_barrier_buffer_capacity(2),
+    );
+    let owner = runtime.allocate_object(&object(1, &[0])).expect("owner");
+    let target = runtime.allocate_object(&object(0, &[])).expect("target");
+    runtime
+        .store_reference(owner, ObjectSlot::new(0), Some(target))
+        .expect("snapshot edge");
+    let mut roots = one_stack_root(12, owner);
+    runtime
+        .start_major_collection(&roots)
+        .expect("start mature snapshot");
+    let mutator = runtime
+        .register_mutator(MutatorExecutionState::Managed)
+        .expect("register exact mutator");
+
+    runtime
+        .store_reference_for_mutator(mutator, owner, ObjectSlot::new(0), None)
+        .expect("buffered overwrite");
+    assert_eq!(runtime.buffered_barrier_entries(mutator), 1);
+
+    finish_major(&mut runtime, &mut roots);
+    assert!(
+        runtime.contains(target),
+        "SATB snapshot target must survive"
+    );
+    assert_eq!(runtime.buffered_barrier_entries(mutator), 0);
+    runtime
+        .unregister_mutator(mutator)
+        .expect("unregister drained mutator");
+
+    runtime.request_major_collection();
+    finish_major(&mut runtime, &mut roots);
+    assert!(!runtime.contains(target));
 }

@@ -20,14 +20,26 @@ ABI 1.19 adds the exact `pop_rt_codec_write_event` and
 `pop_rt_codec_read_event` entries for ADR 0092's closed typed codec tape. Their
 fixed-width tags and statuses carry no descriptor pointer, registry key,
 runtime Item name, or variadic payload.
+ABI 1.20 adds `pop_rt_allocate_initialized_object_at_site` and one fixed-width
+immutable allocation-site descriptor. New LLVM output passes the descriptor
+plus initializer words without rebuilding pointer maps on the stack; ABI 1.19
+entries remain supported.
+ABI 1.21 adds only ADR 0102's two verified adjacent-operation adapters.
+ABI 1.22 adds
+`pop_rt_allocate_initialized_self_referential_object_at_site` and the closed
+`pop_rt_iteration_make` constructor from ADR 0104.
 
 [ADR 0078](../../../architecture/decisions/0078-native-abi-2-writable-root-coexistence.md)
 adds distinct immutable ABI 1.11 and ABI 2.0 descriptors. ABI 2 owns the
 separate `pop_rt_gc_safe_point_v2` writable-root spelling and the fixed
 `pop_rt_supports_abi` negotiation spelling; their presence never makes an
-incomplete facade advertise ABI 2 support.
+incomplete facade advertise ABI 2 support. ADR 0103's separately built
+production facade is the complete ABI 2.0 composition; the default facade
+continues to reject it.
 
 It owns no heap, collector, exported function implementation, process-global
 state, or backend lowering. Unsupported operations return no symbol instead of
 receiving a fallback. See
 [ADR 0038](../../../architecture/decisions/0038-modular-portable-runtime-implementation.md).
+Static allocation-site descriptors are specified by
+[ADR 0100](../../../architecture/decisions/0100-static-allocation-site-descriptors.md).

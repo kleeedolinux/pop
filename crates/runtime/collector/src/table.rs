@@ -1,5 +1,7 @@
 //! Precise growable storage mechanics for typed associative tables.
 
+use std::sync::Arc;
+
 use pop_runtime_interface::{
     ArrayElementMap, ManagedReference, ObjectMap, ObjectSlot, RuntimeFailure,
 };
@@ -66,7 +68,7 @@ impl BootstrapRuntime {
         for _ in old_slots..new_slots {
             allocation.slots.push(SlotValue::scalar(0));
         }
-        allocation.object_map = object_map;
+        allocation.object_map = Arc::new(object_map);
         self.slot_count += added;
         Ok(())
     }

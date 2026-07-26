@@ -2,8 +2,9 @@ use pop_runtime_collector::{
     AllocationInfrastructureConfig, GenerationalRuntime, HeapDomain, MajorCollectorConfig,
 };
 use pop_runtime_interface::{
-    AllocationClass, ArrayAllocationRequest, ArrayElementMap, ObjectAllocationRequest, ObjectMap,
-    ObjectSlot, RootPublication, RootSlot, RuntimeAdapter, RuntimeTypeId, SafePointId, StackMap,
+    AllocationClass, AllocationSiteDescriptor, ArrayAllocationRequest, ArrayElementMap,
+    ObjectAllocationRequest, ObjectMap, ObjectSlot, RootPublication, RootSlot, RuntimeAdapter,
+    RuntimeAllocationSiteId, RuntimeTypeId, SafePointId, StackMap,
 };
 
 fn object(
@@ -142,6 +143,51 @@ fn same_layout_mature_allocations_reuse_free_page_capacity() {
 }
 
 #[test]
+fn monomorphic_pages_own_the_contiguous_physical_payload_words() {
+    let mut runtime = runtime();
+    let request = object(230, AllocationClass::Mature, 2, &[]);
+    let first = runtime
+        .allocate_object(&request)
+        .expect("first page-backed object");
+    let second = runtime
+        .allocate_object(&request)
+        .expect("second page-backed object");
+    let first_placement = runtime.placement(first).expect("first placement");
+    let second_placement = runtime.placement(second).expect("second placement");
+    assert_eq!(first_placement.page(), second_placement.page());
+    assert!(runtime.payload_is_page_backed(first));
+    assert!(runtime.payload_is_page_backed(second));
+    assert!(runtime.layout_is_page_shared(first));
+    assert!(runtime.layout_is_page_shared(second));
+
+    runtime
+        .store_scalar(first, ObjectSlot::new(0), 11)
+        .expect("first payload store");
+    runtime
+        .store_scalar(first, ObjectSlot::new(1), 12)
+        .expect("second payload store");
+    runtime
+        .store_scalar(second, ObjectSlot::new(0), 21)
+        .expect("third payload store");
+    runtime
+        .store_scalar(second, ObjectSlot::new(1), 22)
+        .expect("fourth payload store");
+
+    let page = first_placement.page();
+    assert_eq!(
+        runtime
+            .page_descriptor(page)
+            .expect("page descriptor")
+            .payload_word_capacity(),
+        8
+    );
+    assert_eq!(runtime.page_payload_word(page, 0), Some(11));
+    assert_eq!(runtime.page_payload_word(page, 1), Some(12));
+    assert_eq!(runtime.page_payload_word(page, 2), Some(21));
+    assert_eq!(runtime.page_payload_word(page, 3), Some(22));
+}
+
+#[test]
 fn scalar_array_bulk_initialization_constructs_the_final_payload_once() {
     let mut runtime = runtime();
     let request = ArrayAllocationRequest::new(
@@ -253,6 +299,8 @@ fn nursery_copying_replaces_eden_placement_with_survivor_then_mature_pages() {
             .domain(),
         HeapDomain::LocalSurvivor
     );
+    assert!(runtime.payload_is_page_backed(survivor));
+    assert!(runtime.layout_is_page_shared(survivor));
 
     runtime.request_minor_collection();
     runtime.safe_point(&mut roots).expect("second minor");
@@ -265,6 +313,84 @@ fn nursery_copying_replaces_eden_placement_with_survivor_then_mature_pages() {
             .domain(),
         HeapDomain::LocalMature
     );
+    assert!(runtime.payload_is_page_backed(mature));
+    assert!(runtime.layout_is_page_shared(mature));
+}
+
+#[test]
+fn nursery_relocation_invalidates_a_retained_direct_page_access() {
+    let mut runtime = runtime();
+    let request = object(301, AllocationClass::NurseryEligible, 1, &[]);
+    let young = runtime.allocate_object(&request).expect("young");
+    let access = runtime
+        .direct_object_page_access(young)
+        .expect("direct page access");
+    assert_eq!(access.load(young, ObjectSlot::new(0)), Some(0));
+    assert!(access.store_scalar(young, ObjectSlot::new(0), 41));
+    assert_eq!(access.load(young, ObjectSlot::new(0)), Some(41));
+    let mut roots = RootPublication::new(
+        StackMap::new(SafePointId::new(301), vec![RootSlot::new(0)]).expect("stack map"),
+        vec![Some(young)],
+    )
+    .expect("roots");
+
+    runtime.request_minor_collection();
+    runtime.safe_point(&mut roots).expect("minor collection");
+
+    assert_eq!(access.load(young, ObjectSlot::new(0)), None);
+    assert!(!access.store_scalar(young, ObjectSlot::new(0), 99));
+    let relocated = roots.managed_references().next().expect("relocated root");
+    assert_eq!(
+        runtime
+            .load_scalar(relocated, ObjectSlot::new(0))
+            .expect("relocated scalar"),
+        41
+    );
+}
+
+#[test]
+fn direct_mature_reference_store_is_invalidated_before_major_marking() {
+    let mut runtime = runtime();
+    let child_request = object(302, AllocationClass::Mature, 1, &[]);
+    let first = runtime
+        .allocate_object(&child_request)
+        .expect("first child");
+    let second = runtime
+        .allocate_object(&child_request)
+        .expect("second child");
+    let array_request = ArrayAllocationRequest::new(
+        RuntimeTypeId::new(303),
+        AllocationClass::Mature,
+        2,
+        ArrayElementMap::ManagedReference,
+    );
+    let array = runtime
+        .allocate_array_filled(&array_request, first.raw())
+        .expect("managed array");
+    let store = runtime
+        .direct_array_reference_store_access(array)
+        .expect("direct reference store");
+    let target = runtime
+        .direct_reference_validation(second)
+        .expect("direct target validation");
+
+    assert!(store.store(array, ObjectSlot::new(1), Some((second, &target))));
+    assert_eq!(
+        runtime
+            .load_array_value(array, ObjectSlot::new(1))
+            .expect("stored reference"),
+        second.raw()
+    );
+
+    let roots = RootPublication::new(
+        StackMap::new(SafePointId::new(302), Vec::new()).expect("stack map"),
+        Vec::new(),
+    )
+    .expect("roots");
+    runtime
+        .start_major_collection(&roots)
+        .expect("start major collection");
+    assert!(!store.store(array, ObjectSlot::new(0), None));
 }
 
 #[test]
@@ -284,5 +410,65 @@ fn pinning_moves_a_young_placement_to_stable_pinned_space_immediately() {
         runtime.placement(young).expect("pinned placement").domain(),
         HeapDomain::Pinned
     );
+    assert!(runtime.payload_is_page_backed(young));
+    assert!(runtime.layout_is_page_shared(young));
     runtime.unpin(pin).expect("unpin");
+}
+
+#[test]
+fn sustained_site_survival_adaptively_pretenures_only_that_exact_layout() {
+    let mut runtime = runtime();
+    let descriptor = AllocationSiteDescriptor::new(
+        RuntimeAllocationSiteId::new(7, 11, 13),
+        RuntimeTypeId::new(310),
+        AllocationClass::NurseryEligible,
+        ObjectMap::scalar(1),
+    );
+    let request = ObjectAllocationRequest::from_descriptor(&descriptor);
+    let mut roots = RootPublication::new(
+        StackMap::new(SafePointId::new(310), (0..4).map(RootSlot::new).collect())
+            .expect("four-root stack map"),
+        (0..4)
+            .map(|_| runtime.allocate_object(&request).map(Some))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("site allocations"),
+    )
+    .expect("site roots");
+
+    for _ in 0..2 {
+        runtime.request_minor_collection();
+        runtime
+            .safe_point(&mut roots)
+            .expect("high-survival minor collection");
+    }
+
+    let pretenured = runtime
+        .allocate_object(&request)
+        .expect("adaptively pretenured allocation");
+    assert_eq!(
+        runtime
+            .placement(pretenured)
+            .expect("pretenured placement")
+            .domain(),
+        HeapDomain::LocalMature
+    );
+    assert_eq!(
+        runtime.pretenured_allocation_sites(),
+        [descriptor.site()].into_iter().collect()
+    );
+
+    let unrelated = runtime
+        .allocate_object(&ObjectAllocationRequest::new(
+            descriptor.type_id(),
+            AllocationClass::NurseryEligible,
+            descriptor.object_map().clone(),
+        ))
+        .expect("unrelated non-site allocation");
+    assert_eq!(
+        runtime
+            .placement(unrelated)
+            .expect("unrelated placement")
+            .domain(),
+        HeapDomain::LocalEden
+    );
 }

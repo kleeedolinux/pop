@@ -23,7 +23,9 @@ use crate::api::{LlvmLoweringError, LlvmLoweringOptions, LlvmModule};
 use crate::async_lowering::{lower_async_function, lower_async_nested};
 use crate::ffi_buffer::marshalling;
 use crate::instruction_lowering::{
-    llvm_results, llvm_type, lower_instruction, lower_runtime_slot_load, lower_terminator,
+    allocation_site_symbol, is_managed_type, llvm_results, llvm_type,
+    lower_adjacent_array_field_get, lower_adjacent_class_array_store, lower_instruction,
+    lower_runtime_slot_load, lower_terminator,
 };
 
 #[derive(Clone, Copy)]
@@ -106,6 +108,13 @@ pub fn lower_mir_to_llvm_ir(
     let self_capture_slots = collect_self_capture_slots(bubble);
     let memory_none_functions = analyze_memory_none_functions(bubble);
     let callback_plan = crate::ffi_callback::plan_callbacks(bubble)?;
+    let allocation_site_descriptors = crate::module_lowering::render_allocation_site_descriptors(
+        bubble,
+        matches!(
+            options.runtime_profile,
+            pop_backend_api::RuntimeProfile::ProductionGenerational
+        ),
+    )?;
     let callback_thunks = crate::ffi_callback::lower_thunks(bubble, &callback_plan, types, target)?;
     let has_callback_thunks = !callback_thunks.is_empty();
     let foreign_functions = bubble
@@ -287,8 +296,8 @@ pub fn lower_mir_to_llvm_ir(
             native_runtime_symbol(RuntimeOperation::AllocateObject)
         ),
         format!(
-            "declare i64 @{}(i64, ptr, i64, ptr, i64)",
-            native_runtime_symbol(RuntimeOperation::AllocateObjectInitialized)
+            "declare i64 @{}(ptr, ptr, i64)",
+            native_runtime_symbol(RuntimeOperation::AllocateObjectInitializedAtSite)
         ),
         "declare i64 @pop_rt_allocate_mapped_object(i64, ptr, i64)".to_owned(),
         format!(
@@ -572,6 +581,7 @@ pub fn lower_mir_to_llvm_ir(
                 .chain(crate::module_lowering::render_class_runtime_descriptors(
                     &class_runtime_keys,
                 ))
+                .chain(allocation_site_descriptors)
                 .collect(),
             declarations,
             entry_point,
@@ -1362,6 +1372,22 @@ pub(crate) fn lower_function_parts(
         }
     }
     let direct_scalar_arrays = DirectScalarArrays::analyze(function_blocks, &value_types, types);
+    let mut value_use_counts = BTreeMap::<ValueId, usize>::new();
+    for block in function_blocks {
+        for instruction in block.instructions() {
+            for operand in instruction.operands() {
+                *value_use_counts.entry(operand).or_default() += 1;
+            }
+            if let MirInstructionKind::GcSafePoint { roots, .. } = instruction.kind() {
+                for root in roots {
+                    *value_use_counts.entry(*root).or_default() += 1;
+                }
+            }
+        }
+        for value in terminator_values(block.terminator()) {
+            *value_use_counts.entry(value).or_default() += 1;
+        }
+    }
     let view_lenders = crate::views::collect_lenders(function_blocks, &value_types, types);
     let writable_roots = matches!(
         options.runtime_profile,
@@ -1442,9 +1468,75 @@ pub(crate) fn lower_function_parts(
                 function_blocks,
                 &direct_scalar_arrays,
             ));
+            initialization.extend(initialize_safe_point_root_arrays(
+                function_blocks,
+                &direct_scalar_arrays,
+            ));
             instructions.splice(0..0, initialization);
         }
-        for instruction in block.instructions() {
+        let mut skipped_fused_result = None;
+        for (instruction_index, instruction) in block.instructions().iter().enumerate() {
+            if skipped_fused_result == Some(instruction.result()) {
+                skipped_fused_result = None;
+                continue;
+            }
+            let fused_array_store =
+                block
+                    .instructions()
+                    .get(instruction_index + 1)
+                    .and_then(|next| {
+                        let MirInstructionKind::ClassMake {
+                            class,
+                            allocation_site,
+                            fields,
+                            object_map,
+                        } = instruction.kind()
+                        else {
+                            return None;
+                        };
+                        let MirInstructionKind::ArraySet {
+                            array,
+                            index,
+                            value,
+                            element_map,
+                        } = next.kind()
+                        else {
+                            return None;
+                        };
+                        (matches!(
+                            options.runtime_profile,
+                            pop_backend_api::RuntimeProfile::BootstrapStableHandles
+                        ) && *value == instruction.result()
+                            && value_use_counts.get(value).copied() == Some(1)
+                            && matches!(element_map, ArrayElementMap::ManagedReference))
+                        .then_some((
+                            next,
+                            *class,
+                            *allocation_site,
+                            fields.as_slice(),
+                            object_map,
+                            *array,
+                            *index,
+                        ))
+                    });
+            let fused_field_get =
+                block
+                    .instructions()
+                    .get(instruction_index + 1)
+                    .and_then(|next| {
+                        let MirInstructionKind::ArrayGetChecked { array, index } =
+                            instruction.kind()
+                        else {
+                            return None;
+                        };
+                        let MirInstructionKind::FieldGet { base, field } = next.kind() else {
+                            return None;
+                        };
+                        (*base == instruction.result()
+                            && value_use_counts.get(base).copied() == Some(1)
+                            && is_managed_type(instruction.result_type(), types))
+                        .then_some((next, *array, *index, *field))
+                    });
             if options.emit_comments {
                 instructions.push(format!("; mir v{}", instruction.result().raw()));
             }
@@ -1502,27 +1594,67 @@ pub(crate) fn lower_function_parts(
                 &format!("v{}", instruction.result().raw()),
                 &mut instructions,
             ));
-            let lowered = lower_instruction(
-                bubble,
-                owner,
-                instruction,
-                &value_types,
-                types,
-                ffi_layouts,
-                foreign_functions,
-                field_layout,
-                class_runtime_keys,
-                record_fields,
-                record_field_types,
-                string_literals,
-                environment,
-                &proven_non_overflow_adds,
-                &direct_scalar_arrays,
-                callback_plan,
-                codec_adapters,
-                &view_lenders,
-                options,
-            )?;
+            let lowered = if let Some((
+                array_set,
+                class,
+                allocation_site,
+                fields,
+                object_map,
+                array,
+                index,
+            )) = fused_array_store
+            {
+                skipped_fused_result = Some(array_set.result());
+                lower_adjacent_class_array_store(
+                    &format!("%v{}", instruction.result().raw()),
+                    class_runtime_keys
+                        .get(&(class, instruction.result_type()))
+                        .ok_or(LlvmLoweringError::InvalidType(instruction.result_type()))?,
+                    fields,
+                    object_map.slot_count() + 1,
+                    &value_types,
+                    types,
+                    field_layout,
+                    &allocation_site_symbol(bubble, owner, allocation_site),
+                    array,
+                    index,
+                    array_set.result(),
+                )?
+            } else if let Some((field_get, array, index, field)) = fused_field_get {
+                skipped_fused_result = Some(field_get.result());
+                lower_adjacent_array_field_get(
+                    instruction,
+                    field_get,
+                    array,
+                    index,
+                    field,
+                    &value_types,
+                    types,
+                    field_layout,
+                )?
+            } else {
+                lower_instruction(
+                    bubble,
+                    owner,
+                    instruction,
+                    &value_types,
+                    types,
+                    ffi_layouts,
+                    foreign_functions,
+                    field_layout,
+                    class_runtime_keys,
+                    record_fields,
+                    record_field_types,
+                    string_literals,
+                    environment,
+                    &proven_non_overflow_adds,
+                    &direct_scalar_arrays,
+                    callback_plan,
+                    codec_adapters,
+                    &view_lenders,
+                    options,
+                )?
+            };
             let lowered = rewrite_relocated_value_uses(&lowered, &use_aliases);
             verify_rewritten_root_uses(
                 &lowered,
@@ -2175,6 +2307,31 @@ pub(crate) fn initialize_array_outputs(
             }
         })
         .map(|instruction| format!("%v{}_output = alloca i64", instruction.result().raw()))
+        .collect()
+}
+
+pub(crate) fn initialize_safe_point_root_arrays(
+    blocks: &[pop_mir::MirBlock],
+    direct_scalar_arrays: &DirectScalarArrays,
+) -> Vec<String> {
+    blocks
+        .iter()
+        .flat_map(pop_mir::MirBlock::instructions)
+        .filter_map(|instruction| match instruction.kind() {
+            MirInstructionKind::GcSafePoint { roots, .. } => {
+                let root_count = roots
+                    .iter()
+                    .filter(|root| direct_scalar_arrays.origin(**root).is_none())
+                    .count();
+                (root_count != 0).then(|| {
+                    format!(
+                        "%v{}_roots = alloca [{root_count} x i64]",
+                        instruction.result().raw()
+                    )
+                })
+            }
+            _ => None,
+        })
         .collect()
 }
 

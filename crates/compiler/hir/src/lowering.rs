@@ -1143,8 +1143,13 @@ fn lower_expression(
             last: Box::new(lower_expression(last, interface_slots)),
             step: Box::new(lower_expression(step, interface_slots)),
         },
-        TypedExpressionKind::Record { record, fields } => HirExpressionKind::Record {
+        TypedExpressionKind::Record {
+            record,
+            allocation_site,
+            fields,
+        } => HirExpressionKind::Record {
             record: *record,
+            allocation_site: *allocation_site,
             fields: fields
                 .iter()
                 .map(|field| lower_field_value(field, interface_slots))
@@ -1153,10 +1158,12 @@ fn lower_expression(
         TypedExpressionKind::ClassConstruct {
             class,
             definition,
+            allocation_site,
             fields,
         } => HirExpressionKind::ClassConstruct {
             class: *class,
             definition: *definition,
+            allocation_site: *allocation_site,
             fields: fields
                 .iter()
                 .map(|field| lower_field_value(field, interface_slots))

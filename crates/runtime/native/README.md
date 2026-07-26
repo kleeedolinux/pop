@@ -1,11 +1,12 @@
 # Native Runtime Facade
 
 `pop-runtime-native` composes the portable collector with the versioned native
-ABI. It owns exported C functions, the process-global synchronized stable-token
-generational instance, UTF-8 and process-entry adaptation, and native
-trap/unwind termination. ABI 1 native allocations remain non-moving while
-using incremental SATB mature marking and bounded sweeping; moving nursery and
-evacuation require the future ABI 2 writable-root contract.
+ABI. It owns exported C functions, one statically selected native collector
+composition, UTF-8 and process-entry adaptation, and native trap/unwind
+termination. The default ABI 1 build remains non-moving while using
+incremental SATB mature marking and bounded sweeping. The explicit
+`production-generational` build selects ADR 0103's moving, mutator-overlapped
+collector and reports only ABI 2.0.
 
 ABI 1.11 adds atomic initialized-object allocation: the facade validates the
 complete precise map and every managed initializer before delegating one
@@ -35,6 +36,30 @@ select exact schemas statically; the native facade carries only sealed
 writer/reader capability events and never parses `.popc`, resolves runtime
 names, or maintains an adapter registry.
 
+ABI 1.20 adds immutable compiler-emitted allocation-site descriptors. The
+facade validates and interns each typed site once, rejects identity aliasing,
+and reuses its exact page-shared layout for later atomic initialized
+allocations. An address-matched thread-local hit trusts the descriptor's
+required process-lifetime immutability and reuses the validated typed request
+without decoding its fingerprint again.
+
+ABI 1.22 adds failure-atomic self-recursive allocation at one immutable site
+and the closed native `Iteration<T>` constructor. Compiler-declared self slots
+and constant-size homogeneous/strided layout formulas remove cyclic and
+collection pointer-map rebuilds without introducing a dynamic layout facility.
+
+Initialized objects and arrays construct their complete unpublished payload
+directly in the destination page. Checked array and field reads cache an exact
+thread-local page span and avoid the process-global runtime mutex on a hit; the
+final placement-revision check fails closed after relocation, evacuation,
+ownership moves, or reclamation. Checked scalar array and field stores reuse
+the same page access outside the mutex. Scheduler-local mature reference-array
+stores additionally cache a typed owner capability and a page-bounded target
+validation while major marking is idle. Invalid targets and every case needing
+SATB, card, ownership, or generation work retain the checked slow path.
+Allocation, remaining mutation/slow-path access, publication, safe points, and
+collection remain serialized in the ABI 1 correctness facade.
+
 Heap storage, reachability, roots, pins, and collection policy remain in
 `pop-runtime-collector`; symbol/version vocabulary remains in
 `pop-runtime-native-abi`. See
@@ -43,6 +68,12 @@ The native collector transition is specified by
 [ADR 0070](../../../architecture/decisions/0070-native-stable-generational-transition.md).
 Atomic initialized publication is specified by
 [ADR 0072](../../../architecture/decisions/0072-atomic-initialized-object-allocation.md).
+Static allocation-site descriptors are specified by
+[ADR 0100](../../../architecture/decisions/0100-static-allocation-site-descriptors.md).
+Closed layout families and cyclic initialization are specified by
+[ADR 0104](../../../architecture/decisions/0104-closed-layout-families-and-atomic-cyclic-initialization.md).
+Production selection is specified by
+[ADR 0103](../../../architecture/decisions/0103-selectable-mutator-overlapped-production-collector.md).
 
 The facade is divided into `identity`, `allocation`, `binding`, `storage`,
 `text`, `roots`, `foreign`, `ffi_callback`, `failure`, `scheduler`, and private
@@ -65,12 +96,11 @@ detached mutator registration for its lifetime, enters managed state only while
 polling a task, carries an exact thread-local scheduler/mutator binding through
 serialized native ABI operations, acknowledges active collection epochs at
 managed safe points, and unregisters on shutdown. Every ready or suspended task
-frame owns one collector-visible precise root container. ABI 1 remains the
-stable-token serialized correctness stage; moving native execution still waits
-for the ABI 2 backend reload proof. The staged
-`pop_rt_gc_safe_point_v2` entry performs failure-atomic writable slot
-installation, but this stable facade deliberately rejects ABI 2 capability
-negotiation.
+frame owns one collector-visible precise root container. The default ABI 1
+facade remains the stable-token serialized correctness stage and rejects ABI
+2. The production build uses the same binding with
+`pop_rt_gc_safe_point_v2`, restores every relocated root before resuming
+managed code, rejects ABI 1, and reports the production collector stage.
 
 The checksum-validated synchronized-reference benchmark is available with:
 

@@ -4,6 +4,8 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+#[cfg(feature = "production-generational")]
+use pop_runtime_collector::BackgroundWorkerConfig;
 use pop_runtime_collector::{
     EpochCoordinatorTelemetry, MutatorExecutionState, MutatorId, StableGenerationalRuntime,
     TaskFrameRootError,
@@ -51,11 +53,30 @@ pub(crate) struct ListMetadata {
 }
 
 pub(crate) fn abi_runtime() -> &'static Mutex<StableGenerationalRuntime> {
-    ABI_RUNTIME.get_or_init(|| Mutex::new(StableGenerationalRuntime::new()))
+    ABI_RUNTIME.get_or_init(|| {
+        #[cfg(feature = "production-generational")]
+        let runtime = {
+            let workers = BackgroundWorkerConfig::new(2, 64)
+                .expect("the production native worker bounds are nonzero");
+            StableGenerationalRuntime::production_with_background_workers(workers)
+                .expect("the production native collector workers must start")
+        };
+        #[cfg(not(feature = "production-generational"))]
+        let runtime = StableGenerationalRuntime::new();
+        Mutex::new(runtime)
+    })
 }
 
 pub(crate) fn lock_abi_runtime()
 -> Result<MutexGuard<'static, StableGenerationalRuntime>, RuntimeFailure> {
+    let mut runtime = lock_abi_runtime_raw()?;
+    crate::allocation::flush_thread_local_allocations(&mut runtime)?;
+    Ok(runtime)
+}
+
+pub(crate) fn lock_abi_runtime_raw()
+-> Result<MutexGuard<'static, StableGenerationalRuntime>, RuntimeFailure> {
+    crate::storage::quiesce_direct_accesses();
     let mut runtime = abi_runtime()
         .lock()
         .map_err(|_| RuntimeFailure::runtime_invariant())?;
@@ -99,16 +120,15 @@ pub(crate) fn leave_native_managed_execution(
     scheduler: SchedulerId,
     mutator: MutatorId,
 ) -> Result<(), RuntimeFailure> {
-    let binding = NATIVE_EXECUTION_BINDING.with(|binding| binding.replace(None));
-    if binding != Some(NativeExecutionBinding { scheduler, mutator }) {
+    if current_native_execution_binding() != Some(NativeExecutionBinding { scheduler, mutator }) {
         return Err(RuntimeFailure::runtime_invariant());
     }
-    let mut runtime = abi_runtime()
-        .lock()
-        .map_err(|_| RuntimeFailure::runtime_invariant())?;
+    let mut runtime = lock_abi_runtime_raw()?;
+    crate::allocation::flush_thread_local_allocations(&mut runtime)?;
     runtime
         .transition_scheduler_mutator(mutator, scheduler, MutatorExecutionState::Detached)
         .map_err(|_| RuntimeFailure::runtime_invariant())?;
+    NATIVE_EXECUTION_BINDING.with(|binding| binding.set(None));
     Ok(())
 }
 

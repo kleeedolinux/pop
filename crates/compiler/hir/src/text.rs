@@ -921,7 +921,7 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             output.push(' ');
             dump_expression(output, step, arena);
         }
-        HirExpressionKind::Record { record, fields } => {
+        HirExpressionKind::Record { record, fields, .. } => {
             let _ = write!(output, "record s{} ", record.raw());
             dump_fields(output, fields, arena);
         }
@@ -929,6 +929,7 @@ fn dump_expression(output: &mut String, expression: &HirExpression, arena: &Type
             class,
             definition,
             fields,
+            ..
         } => {
             dump_class(output, *class, *definition, fields, arena);
         }

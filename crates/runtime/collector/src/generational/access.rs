@@ -1,21 +1,127 @@
 //! Typed logical access to generational object, array, and table storage.
 
+use std::sync::Arc;
+
 use pop_runtime_interface::{
     AllocationClass, ArrayElementMap, ManagedReference, ObjectMap, ObjectSlot, RuntimeFailure,
     RuntimeTypeId,
 };
 
 use crate::heap::{AllocationKind, SlotValue};
+use crate::ownership::{ObjectMutability, ObjectOwnership};
+use crate::relocation::CollectorGeneration;
 
 use super::heap::GenerationalRuntime;
+use super::{DirectPageAccess, DirectReferenceStoreAccess, DirectReferenceValidation};
 
 impl GenerationalRuntime {
+    #[must_use]
+    pub fn direct_object_page_access(
+        &self,
+        reference: ManagedReference,
+    ) -> Option<DirectPageAccess> {
+        self.allocation
+            .direct_page_access(reference, Some(AllocationKind::Object))
+    }
+
+    #[must_use]
+    pub fn direct_array_page_access(
+        &self,
+        reference: ManagedReference,
+    ) -> Option<DirectPageAccess> {
+        let kind = self.nursery.objects.get(&reference).and_then(|object| {
+            match object.allocation.kind {
+                AllocationKind::Array(element_map) => Some(AllocationKind::Array(element_map)),
+                AllocationKind::Object | AllocationKind::Table => None,
+            }
+        })?;
+        self.allocation.direct_page_access(reference, Some(kind))
+    }
+
+    #[must_use]
+    pub fn direct_array_reference_store_access(
+        &self,
+        reference: ManagedReference,
+    ) -> Option<DirectReferenceStoreAccess> {
+        if self.major_cycle_active() {
+            return None;
+        }
+        self.nursery.objects.get(&reference).filter(|object| {
+            object.allocation.kind == AllocationKind::Array(ArrayElementMap::ManagedReference)
+                && object.generation == CollectorGeneration::Mature
+                && object.mutability == ObjectMutability::Mutable
+        })?;
+        let scheduler = self.direct_local_mature_scheduler(reference)?;
+        let access = self.allocation.direct_page_access(
+            reference,
+            Some(AllocationKind::Array(ArrayElementMap::ManagedReference)),
+        )?;
+        DirectReferenceStoreAccess::new(access, scheduler)
+    }
+
+    #[must_use]
+    pub fn direct_reference_validation(
+        &self,
+        reference: ManagedReference,
+    ) -> Option<DirectReferenceValidation> {
+        if self.major_cycle_active() {
+            return None;
+        }
+        if self
+            .nursery
+            .objects
+            .get(&reference)
+            .is_some_and(|object| object.generation != CollectorGeneration::Mature)
+        {
+            return None;
+        }
+        if !self.nursery.contains(reference)
+            && !self
+                .deferred_mature
+                .iter()
+                .any(|publication| publication.contains(reference))
+        {
+            return None;
+        }
+        let scheduler = self.direct_local_mature_scheduler(reference)?;
+        let access = self.allocation.direct_page_access(reference, None)?;
+        Some(DirectReferenceValidation::new(access, scheduler))
+    }
+
+    fn direct_local_mature_scheduler(
+        &self,
+        reference: ManagedReference,
+    ) -> Option<crate::SchedulerId> {
+        let scheduler = if let Some(object) = self.nursery.objects.get(&reference) {
+            let ObjectOwnership::SchedulerLocal(scheduler) = object.ownership else {
+                return None;
+            };
+            scheduler
+        } else {
+            self.deferred_mature
+                .iter()
+                .find(|publication| publication.contains(reference))
+                .map(|publication| publication.scheduler)?
+        };
+        let placement = self.allocation.placement(reference)?;
+        let page = self.allocation.page(placement.page())?;
+        (placement.domain() == super::HeapDomain::LocalMature
+            && page.scheduler() == Some(scheduler))
+        .then_some(scheduler)
+    }
+
     #[must_use]
     pub fn allocation_type(&self, reference: ManagedReference) -> Option<RuntimeTypeId> {
         self.nursery
             .objects
             .get(&reference)
             .map(|object| object.allocation.type_id)
+            .or_else(|| {
+                self.deferred_mature
+                    .iter()
+                    .find(|publication| publication.contains(reference))
+                    .map(|publication| publication.type_id)
+            })
     }
 
     #[must_use]
@@ -24,6 +130,12 @@ impl GenerationalRuntime {
             .objects
             .get(&reference)
             .map(|object| object.allocation.class)
+            .or_else(|| {
+                self.deferred_mature
+                    .iter()
+                    .find(|publication| publication.contains(reference))
+                    .map(|_| AllocationClass::Mature)
+            })
     }
 
     #[must_use]
@@ -38,11 +150,11 @@ impl GenerationalRuntime {
                 allocation.kind,
                 AllocationKind::Array(ArrayElementMap::Scalar)
             )
-            || !allocation.object_map.reference_slots().is_empty()
+            || allocation.object_map.has_reference_slots()
         {
             return None;
         }
-        Some(allocation.slots.iter().map(|slot| slot.raw()))
+        Some(allocation.slots.iter().map(SlotValue::raw))
     }
 
     #[must_use]
@@ -64,14 +176,12 @@ impl GenerationalRuntime {
         value: u64,
     ) -> Result<(), RuntimeFailure> {
         self.ensure_mutable(owner)?;
-        let (length, element_map) = self
+        let element_map = self
             .nursery
             .objects
             .get(&owner)
             .and_then(|object| match object.allocation.kind {
-                AllocationKind::Array(element_map) => {
-                    Some((object.allocation.slots.len(), element_map))
-                }
+                AllocationKind::Array(element_map) => Some(element_map),
                 AllocationKind::Object | AllocationKind::Table => None,
             })
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
@@ -86,16 +196,18 @@ impl GenerationalRuntime {
             slots.fill(SlotValue::scalar(value));
             return Ok(());
         }
-        for index in 0..length {
-            let slot = ObjectSlot::new(
-                u32::try_from(index).map_err(|_| RuntimeFailure::runtime_invariant())?,
-            );
-            self.store_reference(
-                owner,
-                slot,
-                (value != 0).then(|| ManagedReference::new(value)),
-            )?;
+        let value = (value != 0).then(|| ManagedReference::new(value));
+        self.validate_ownership_edge(owner, value)?;
+        let previous = self.nursery.fill_array_references_without_major_barrier(
+            owner,
+            value,
+            self.major.phase == super::MajorCyclePhase::Marking,
+        )?;
+        for reference in previous {
+            self.record_satb(Some(reference));
         }
+        self.record_post_scan_edge(owner, value);
+        self.reference_mutation_version = self.reference_mutation_version.wrapping_add(1);
         Ok(())
     }
 
@@ -119,13 +231,15 @@ impl GenerationalRuntime {
         if allocation.allocation.object_map.is_reference_slot(slot) {
             return Err(RuntimeFailure::runtime_invariant());
         }
-        let current = allocation
+        if allocation
             .allocation
             .slots
-            .get_mut(slot.raw() as usize)
-            .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        *current = SlotValue::scalar(value);
-        Ok(())
+            .set(slot.raw() as usize, SlotValue::scalar(value))
+        {
+            Ok(())
+        } else {
+            Err(RuntimeFailure::runtime_invariant())
+        }
     }
 
     /// Stores a typed physical value in an array slot.
@@ -156,7 +270,6 @@ impl GenerationalRuntime {
         slot: ObjectSlot,
         value: u64,
     ) -> Result<(), RuntimeFailure> {
-        self.ensure_mutable(owner)?;
         let element_map = self
             .nursery
             .objects
@@ -167,10 +280,17 @@ impl GenerationalRuntime {
             })
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
         if element_map == ArrayElementMap::Scalar {
+            self.ensure_mutable(owner)?;
             return self.nursery.store_scalar(owner, slot, value);
         }
-        let previous = self.nursery.slot_value(owner, slot)?.as_reference();
         let value = (value != 0).then(|| ManagedReference::new(value));
+        if self.major.phase != super::MajorCyclePhase::Marking {
+            return self
+                .nursery
+                .store_array_reference_without_major_barrier(owner, slot, value);
+        }
+        self.ensure_mutable(owner)?;
+        let previous = self.nursery.slot_value(owner, slot)?.as_reference();
         if value.is_some_and(|reference| !self.nursery.contains(reference)) {
             return Err(RuntimeFailure::runtime_invariant());
         }
@@ -255,7 +375,6 @@ impl GenerationalRuntime {
             .allocation
             .slots
             .get(slot.raw() as usize)
-            .copied()
             .map(SlotValue::raw)
             .ok_or_else(RuntimeFailure::runtime_invariant)
     }
@@ -270,15 +389,13 @@ impl GenerationalRuntime {
         owner: ManagedReference,
         slot: ObjectSlot,
     ) -> Result<u64, RuntimeFailure> {
-        if !self
-            .nursery
+        self.nursery
             .objects
             .get(&owner)
-            .is_some_and(|object| matches!(object.allocation.kind, AllocationKind::Array(_)))
-        {
-            return Err(RuntimeFailure::runtime_invariant());
-        }
-        self.load_slot_value(owner, slot)
+            .filter(|object| matches!(object.allocation.kind, AllocationKind::Array(_)))
+            .and_then(|object| object.allocation.slots.get(slot.raw() as usize))
+            .map(SlotValue::raw)
+            .ok_or_else(RuntimeFailure::runtime_invariant)
     }
 
     /// Loads a value according to the allocation's precise slot map.
@@ -295,7 +412,6 @@ impl GenerationalRuntime {
             .objects
             .get(&owner)
             .and_then(|object| object.allocation.slots.get(slot.raw() as usize))
-            .copied()
             .map(SlotValue::raw)
             .ok_or_else(RuntimeFailure::runtime_invariant)
     }
@@ -357,6 +473,7 @@ impl GenerationalRuntime {
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
         let type_id = object.allocation.type_id;
         let class = object.allocation.class;
+        let mut next_object_allocation = object.allocation.clone();
         let added = usize::try_from(new_slots - old_slots)
             .map_err(|_| RuntimeFailure::runtime_invariant())?;
         let mut slots = object.allocation.slots.clone();
@@ -373,13 +490,15 @@ impl GenerationalRuntime {
             self.memory.record_out_of_memory();
             return Err(crate::BootstrapRuntime::out_of_memory(0, added));
         }
+        next_object_allocation.object_map = Arc::new(object_map);
+        next_object_allocation.slots = slots;
+        allocation.bind_object(owner, &mut next_object_allocation)?;
         let object = self
             .nursery
             .objects
             .get_mut(&owner)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        object.allocation.object_map = object_map;
-        object.allocation.slots = slots;
+        object.allocation = next_object_allocation;
         self.allocation = allocation;
         self.memory
             .observe_committed(self.allocation.committed_bytes());

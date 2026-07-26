@@ -7,9 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use pop_foundation::{
-    BlockId, BorrowRegionId, BuiltinTypeId, ClassId, EnumCaseId, ErrorId, FieldId, InterfaceId,
-    LifetimeId, MethodId, NestedFunctionId, NominalInterfaceId, SymbolId, SymbolIdentity, TypeId,
-    UnionCaseId, ValueId,
+    AllocationSiteId, BlockId, BorrowRegionId, BuiltinTypeId, ClassId, EnumCaseId, ErrorId,
+    FieldId, InterfaceId, LifetimeId, MethodId, NestedFunctionId, NominalInterfaceId, SymbolId,
+    SymbolIdentity, TypeId, UnionCaseId, ValueId,
 };
 use pop_runtime_interface::{ArrayElementMap, FfiAbiLayoutId, ObjectMap, ObjectSlot, RootSlot};
 use pop_types::{
@@ -237,6 +237,7 @@ pub fn verify_mir_bubble(
         .map(MirForeignFunction::symbol)
         .collect();
     let callback_signatures = verified_callback_signatures(bubble, arena);
+    verify_allocation_site_identities(bubble, &mut errors);
     let mut reference_signatures = BTreeMap::new();
     let mut reference_lifetime_summaries = BTreeMap::new();
     for reference in &bubble.function_references {
@@ -319,6 +320,71 @@ pub fn verify_mir_bubble(
         Ok(())
     } else {
         Err(errors)
+    }
+}
+
+fn verify_allocation_site_identities(bubble: &MirBubble, errors: &mut Vec<MirVerificationError>) {
+    let mut sites_by_owner = BTreeMap::<SymbolId, BTreeSet<AllocationSiteId>>::new();
+    let mut verify_blocks = |owner: SymbolId, blocks: &[MirBlock]| {
+        let sites = sites_by_owner.entry(owner).or_default();
+        for instruction in blocks.iter().flat_map(MirBlock::instructions) {
+            if let Some(site) = instruction_allocation_site(instruction.kind())
+                && !sites.insert(site)
+            {
+                errors.push(MirVerificationError::DuplicateAllocationSite {
+                    function: owner,
+                    site,
+                });
+            }
+        }
+    };
+    for function in bubble.functions() {
+        verify_blocks(function.symbol(), function.blocks());
+    }
+    for method in &bubble.methods {
+        verify_blocks(method.function.symbol(), method.function.blocks());
+    }
+    for nested in &bubble.nested_functions {
+        verify_blocks(nested.owner(), nested.blocks());
+    }
+}
+
+pub(crate) fn instruction_allocation_site(kind: &MirInstructionKind) -> Option<AllocationSiteId> {
+    match kind {
+        MirInstructionKind::RecordMake {
+            allocation_site, ..
+        }
+        | MirInstructionKind::ClassMake {
+            allocation_site, ..
+        }
+        | MirInstructionKind::RecordUpdate {
+            allocation_site, ..
+        }
+        | MirInstructionKind::UnionMake {
+            allocation_site, ..
+        }
+        | MirInstructionKind::ResultMake {
+            allocation_site, ..
+        }
+        | MirInstructionKind::IterationMake {
+            allocation_site, ..
+        }
+        | MirInstructionKind::ErrorMake {
+            allocation_site, ..
+        }
+        | MirInstructionKind::TupleMake {
+            allocation_site, ..
+        }
+        | MirInstructionKind::ViewMaterialize {
+            allocation_site, ..
+        }
+        | MirInstructionKind::CaptureCellAllocate {
+            allocation_site, ..
+        }
+        | MirInstructionKind::ClosureEnvironmentAllocate {
+            allocation_site, ..
+        } => Some(*allocation_site),
+        _ => None,
     }
 }
 
@@ -1468,6 +1534,83 @@ fn verify_gc_contracts(
                         });
                     }
                 }
+                MirInstructionKind::RecordMake {
+                    record, object_map, ..
+                }
+                | MirInstructionKind::RecordUpdate {
+                    record, object_map, ..
+                } => {
+                    if schema.records.get(record).is_some_and(|declaration| {
+                        expected_record_object_map(declaration, arena) != *object_map
+                    }) {
+                        errors.push(MirVerificationError::InvalidObjectMap {
+                            instruction: instruction.result(),
+                        });
+                    }
+                }
+                MirInstructionKind::TupleMake {
+                    elements,
+                    object_map,
+                    ..
+                } => {
+                    if expected_operand_object_map(elements, 0, facts.values, arena)
+                        .is_some_and(|expected| expected != *object_map)
+                    {
+                        errors.push(MirVerificationError::InvalidObjectMap {
+                            instruction: instruction.result(),
+                        });
+                    }
+                }
+                MirInstructionKind::UnionMake {
+                    arguments,
+                    object_map,
+                    ..
+                }
+                | MirInstructionKind::ResultMake {
+                    arguments,
+                    object_map,
+                    ..
+                }
+                | MirInstructionKind::IterationMake {
+                    arguments,
+                    object_map,
+                    ..
+                }
+                | MirInstructionKind::ErrorMake {
+                    arguments,
+                    object_map,
+                    ..
+                } => {
+                    if expected_operand_object_map(arguments, 1, facts.values, arena)
+                        .is_some_and(|expected| expected != *object_map)
+                    {
+                        errors.push(MirVerificationError::InvalidObjectMap {
+                            instruction: instruction.result(),
+                        });
+                    }
+                }
+                MirInstructionKind::CaptureCellAllocate {
+                    value_type,
+                    object_map,
+                    ..
+                } => {
+                    if expected_type_object_map([*value_type], 0, arena) != *object_map {
+                        errors.push(MirVerificationError::InvalidObjectMap {
+                            instruction: instruction.result(),
+                        });
+                    }
+                }
+                MirInstructionKind::ClosureEnvironmentAllocate {
+                    captures,
+                    object_map,
+                    ..
+                } => {
+                    if expected_closure_environment_object_map(captures, arena) != *object_map {
+                        errors.push(MirVerificationError::InvalidObjectMap {
+                            instruction: instruction.result(),
+                        });
+                    }
+                }
                 MirInstructionKind::TaskCreate {
                     dispatch,
                     arguments,
@@ -1721,18 +1864,77 @@ fn unpublished_owner_operation(instruction: &MirInstruction, owner: ValueId) -> 
 }
 
 fn expected_class_object_map(declaration: &MirClassDeclaration, arena: &TypeArena) -> ObjectMap {
-    let references = declaration
-        .fields()
+    expected_type_object_map(
+        declaration.fields().iter().map(MirField::field_type),
+        0,
+        arena,
+    )
+}
+
+fn expected_record_object_map(declaration: &MirRecordDeclaration, arena: &TypeArena) -> ObjectMap {
+    expected_type_object_map(
+        declaration.fields().iter().map(MirField::field_type),
+        0,
+        arena,
+    )
+}
+
+fn expected_operand_object_map(
+    values: &[ValueId],
+    scalar_prefix_slots: u32,
+    value_types: &BTreeMap<ValueId, TypeId>,
+    arena: &TypeArena,
+) -> Option<ObjectMap> {
+    let types = values
+        .iter()
+        .map(|value| value_types.get(value).copied())
+        .collect::<Option<Vec<_>>>()?;
+    Some(expected_type_object_map(types, scalar_prefix_slots, arena))
+}
+
+fn expected_type_object_map(
+    types: impl IntoIterator<Item = TypeId>,
+    scalar_prefix_slots: u32,
+    arena: &TypeArena,
+) -> ObjectMap {
+    let types = types.into_iter().collect::<Vec<_>>();
+    let references = types
         .iter()
         .enumerate()
-        .filter(|(_, field)| is_managed_reference_type_id(field.field_type(), Some(arena)))
-        .map(|(index, _)| ObjectSlot::new(u32::try_from(index).unwrap_or(u32::MAX)))
+        .filter(|(_, type_id)| is_managed_reference_type_id(**type_id, Some(arena)))
+        .map(|(index, _)| {
+            ObjectSlot::new(
+                scalar_prefix_slots.saturating_add(u32::try_from(index).unwrap_or(u32::MAX)),
+            )
+        })
         .collect();
     ObjectMap::new(
-        u32::try_from(declaration.fields().len()).unwrap_or(u32::MAX),
+        scalar_prefix_slots.saturating_add(u32::try_from(types.len()).unwrap_or(u32::MAX)),
         references,
     )
-    .expect("declared class fields form a canonical object map")
+    .expect("verified fixed construction has one canonical object map")
+}
+
+fn expected_closure_environment_object_map(
+    captures: &[MirClosureCapture],
+    arena: &TypeArena,
+) -> ObjectMap {
+    let references = captures
+        .iter()
+        .filter(|capture| {
+            capture.self_reference()
+                || capture.mode() == MirCaptureMode::Cell
+                || is_managed_reference_type_id(capture.type_id(), Some(arena))
+        })
+        .map(|capture| ObjectSlot::new(capture.slot().saturating_add(1)))
+        .collect();
+    ObjectMap::new(
+        u32::try_from(captures.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1),
+        references,
+    )
+    .expect("verified closure environment has one canonical object map")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2704,9 +2906,9 @@ fn verify_view_lifetimes(
                             && parent.provenance == *lender_provenance
                             && view_lifetimes.get(view) == Some(parent_lifetime)
                     });
-                    let (root, provenance) = parent
-                        .map(|parent| (parent.root, parent.provenance))
-                        .unwrap_or((*view, *lender_provenance));
+                    let (root, provenance) = parent.map_or((*view, *lender_provenance), |parent| {
+                        (parent.root, parent.provenance)
+                    });
                     let facts = ViewLifetimeFacts {
                         kind: *kind,
                         provenance,
@@ -2939,13 +3141,7 @@ fn verify_view_escapes(
             }
         }
         match block.terminator() {
-            MirTerminator::Branch { arguments, .. } => {
-                for argument in arguments {
-                    if !view_lifetimes.contains_key(argument) {
-                        continue;
-                    }
-                }
-            }
+            MirTerminator::Branch { .. } => {}
             MirTerminator::Return { values } => {
                 for (index, value) in values.iter().copied().enumerate() {
                     if view_lifetimes.contains_key(&value)
@@ -3057,8 +3253,7 @@ fn verify_view_lifetime_dataflow(
     let entry = function
         .blocks()
         .first()
-        .map(MirBlock::block)
-        .unwrap_or(BlockId::from_raw(0));
+        .map_or(BlockId::from_raw(0), MirBlock::block);
     let mut incoming = BTreeMap::from([(entry, initial)]);
     let mut pending = vec![entry];
     while let Some(block_id) = pending.pop() {
@@ -4101,6 +4296,7 @@ fn verify_instruction_types(
             result,
             case,
             arguments,
+            ..
         } => {
             let expected = match arena.get(instruction.result_type()) {
                 Some(SemanticType::Builtin {
@@ -4124,6 +4320,7 @@ fn verify_instruction_types(
             iteration,
             case,
             arguments,
+            ..
         } => {
             let expected_item = match arena.get(instruction.result_type()) {
                 Some(SemanticType::Builtin {
@@ -4209,7 +4406,7 @@ fn verify_instruction_types(
         | MirInstructionKind::CompareNotEqual { left, right } => {
             verify_equality_instruction(instruction, *left, *right, arena, values, errors);
         }
-        MirInstructionKind::TupleMake(elements) => {
+        MirInstructionKind::TupleMake { elements, .. } => {
             let Some(SemanticType::Tuple(element_types)) = arena.get(instruction.result_type())
             else {
                 errors.push(MirVerificationError::InvalidInstructionType {
@@ -5324,7 +5521,7 @@ fn verify_schema_instruction(
                 });
             }
         }
-        MirInstructionKind::RecordMake { record, fields } => {
+        MirInstructionKind::RecordMake { record, fields, .. } => {
             let Some(declaration) = schema.records.get(record) else {
                 errors.push(MirVerificationError::UnknownRecord {
                     instruction: instruction.result(),
@@ -5364,6 +5561,7 @@ fn verify_schema_instruction(
             record,
             base,
             fields,
+            ..
         } => {
             let Some(declaration) = schema.records.get(record) else {
                 errors.push(MirVerificationError::UnknownRecord {
@@ -5410,6 +5608,7 @@ fn verify_schema_instruction(
             union,
             case,
             arguments,
+            ..
         } => verify_union_make(
             instruction,
             *union,
@@ -5423,6 +5622,7 @@ fn verify_schema_instruction(
             error,
             case,
             arguments,
+            ..
         } => {
             let declaration = schema.errors.get(error);
             let expected = declaration.and_then(|declaration| {
@@ -5830,10 +6030,10 @@ fn verify_callable_instruction(
             }
         }
         MirInstructionKind::GeneratedCodecSchema(adapter) => {
-            if !schema
+            if schema
                 .generated_codec_adapters
                 .get(adapter)
-                .is_some_and(|schema| schema.schema_type() == instruction.result_type())
+                .is_none_or(|schema| schema.schema_type() != instruction.result_type())
             {
                 errors.push(MirVerificationError::InvalidGeneratedCodecSchema(*adapter));
             }
@@ -6870,7 +7070,9 @@ pub(crate) fn instruction_operands(kind: &MirInstructionKind) -> Vec<ValueId> {
         | MirInstructionKind::GcSafePoint { .. } => Vec::new(),
         MirInstructionKind::CodecEncode { value, writer, .. } => vec![*value, *writer],
         MirInstructionKind::CodecDecode { reader, .. } => vec![*reader],
-        MirInstructionKind::TupleMake(values)
+        MirInstructionKind::TupleMake {
+            elements: values, ..
+        }
         | MirInstructionKind::ArrayMake {
             elements: values, ..
         }

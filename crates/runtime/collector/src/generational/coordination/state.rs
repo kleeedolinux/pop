@@ -173,6 +173,15 @@ impl EpochCoordinator {
         self.pending.remove(&id);
         self.publications.insert(id, publication);
         self.telemetry.acknowledgements = self.telemetry.acknowledgements.saturating_add(1);
+        self.telemetry.stack_watermarks_installed =
+            self.telemetry.stack_watermarks_installed.saturating_add(1);
+        self.telemetry.stack_watermark_slots_processed = self
+            .telemetry
+            .stack_watermark_slots_processed
+            .saturating_add(
+                u64::try_from(publication.stack_watermark().processed_root_slots())
+                    .unwrap_or(u64::MAX),
+            );
         Ok(self.progress())
     }
 

@@ -18,6 +18,15 @@ pub enum CollectorGeneration {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct CollectorObjectId(pub(super) u64);
 
+impl CollectorObjectId {
+    pub(crate) const fn checked_add(self, offset: u64) -> Option<Self> {
+        match self.0.checked_add(offset) {
+            Some(value) => Some(Self(value)),
+            None => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RelocationAllocation {
     pub(crate) identity: CollectorObjectId,
@@ -120,8 +129,15 @@ impl RelocationRuntime {
             .objects
             .get_mut(&owner)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        object.allocation.slots[slot.raw() as usize] = SlotValue::reference(value);
-        Ok(())
+        if object
+            .allocation
+            .slots
+            .set(slot.raw() as usize, SlotValue::reference(value))
+        {
+            Ok(())
+        } else {
+            Err(RuntimeFailure::runtime_invariant())
+        }
     }
 
     pub(crate) fn slot_value(
@@ -132,7 +148,6 @@ impl RelocationRuntime {
         self.objects
             .get(&owner)
             .and_then(|object| object.allocation.slots.get(slot.raw() as usize))
-            .copied()
             .ok_or_else(RuntimeFailure::runtime_invariant)
     }
 
@@ -150,16 +165,24 @@ impl RelocationRuntime {
         if !object.allocation.object_map.is_reference_slot(slot) {
             return Err(RuntimeFailure::runtime_invariant());
         }
+        let index = slot.raw() as usize;
         let current = object
             .allocation
             .slots
-            .get_mut(slot.raw() as usize)
+            .get(index)
             .ok_or_else(RuntimeFailure::runtime_invariant)?;
         if current.as_reference() != previous {
             return Err(RuntimeFailure::runtime_invariant());
         }
-        *current = SlotValue::reference(value);
-        Ok(())
+        if object
+            .allocation
+            .slots
+            .set(index, SlotValue::reference(value))
+        {
+            Ok(())
+        } else {
+            Err(RuntimeFailure::runtime_invariant())
+        }
     }
 
     /// Loads a precise managed-reference slot.
@@ -183,7 +206,6 @@ impl RelocationRuntime {
             .allocation
             .slots
             .get(slot.raw() as usize)
-            .copied()
             .map(SlotValue::as_reference)
             .ok_or_else(RuntimeFailure::runtime_invariant)
     }
@@ -206,13 +228,15 @@ impl RelocationRuntime {
         if object.allocation.object_map.is_reference_slot(slot) {
             return Err(RuntimeFailure::runtime_invariant());
         }
-        let current = object
+        if object
             .allocation
             .slots
-            .get_mut(slot.raw() as usize)
-            .ok_or_else(RuntimeFailure::runtime_invariant)?;
-        *current = SlotValue::scalar(value);
-        Ok(())
+            .set(slot.raw() as usize, SlotValue::scalar(value))
+        {
+            Ok(())
+        } else {
+            Err(RuntimeFailure::runtime_invariant())
+        }
     }
 
     pub(crate) fn discard_unpublished(
@@ -225,11 +249,13 @@ impl RelocationRuntime {
                 object
                     .allocation
                     .object_map
-                    .reference_slots()
-                    .iter()
+                    .iter_reference_slots()
                     .any(|slot| {
-                        object.allocation.slots[slot.raw() as usize].as_reference()
-                            == Some(reference)
+                        object
+                            .allocation
+                            .slots
+                            .get(slot.raw() as usize)
+                            .is_some_and(|value| value.as_reference() == Some(reference))
                     })
             })
         {
@@ -242,7 +268,7 @@ impl RelocationRuntime {
         Ok(())
     }
 
-    pub(super) fn fresh_reference(&mut self) -> Result<ManagedReference, RuntimeFailure> {
+    pub(crate) fn fresh_reference(&mut self) -> Result<ManagedReference, RuntimeFailure> {
         let reference = ManagedReference::new(self.next_reference);
         let next = self
             .next_reference

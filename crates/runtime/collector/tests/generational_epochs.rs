@@ -276,6 +276,12 @@ fn registered_mutators_gate_major_workers_until_every_root_snapshot_is_published
             .managed_roots(),
         1
     );
+    let watermark = runtime
+        .mutator_publication(first)
+        .expect("first publication")
+        .stack_watermark();
+    assert_eq!(watermark.safe_point(), SafePointId::new(20));
+    assert_eq!(watermark.processed_root_slots(), 1);
 
     finish_major(&mut runtime, &mut empty_roots(22));
     assert!(runtime.contains(first_object));
@@ -283,6 +289,8 @@ fn registered_mutators_gate_major_workers_until_every_root_snapshot_is_published
     let telemetry = runtime.epoch_coordinator_telemetry();
     assert_eq!(telemetry.epochs_requested(), 1);
     assert_eq!(telemetry.epochs_completed(), 1);
+    assert_eq!(telemetry.stack_watermarks_installed(), 2);
+    assert_eq!(telemetry.stack_watermark_slots_processed(), 2);
     assert!(
         runtime
             .background_worker_telemetry()

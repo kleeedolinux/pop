@@ -260,11 +260,23 @@ impl BackgroundWorkerPool {
     }
 
     pub(crate) fn mark(&mut self, tasks: Vec<MarkTask>) -> Result<Vec<MarkResult>, RuntimeFailure> {
+        let count = self.submit_mark(tasks)?;
+        self.complete_mark(count)
+    }
+
+    pub(crate) fn submit_mark(&mut self, tasks: Vec<MarkTask>) -> Result<usize, RuntimeFailure> {
         let count = tasks.len();
         for task in tasks {
             let sequence = self.next_sequence()?;
             self.submit(WorkerCommand::Mark { sequence, task })?;
         }
+        Ok(count)
+    }
+
+    pub(crate) fn complete_mark(
+        &mut self,
+        count: usize,
+    ) -> Result<Vec<MarkResult>, RuntimeFailure> {
         let results = self.collect(count)?;
         let mut marked = Vec::with_capacity(count);
         for result in results {
@@ -298,6 +310,15 @@ impl BackgroundWorkerPool {
         tasks: Vec<CardRefinementTask>,
         young: &Arc<BTreeSet<ManagedReference>>,
     ) -> Result<BTreeMap<ManagedReference, Vec<ManagedReference>>, RuntimeFailure> {
+        let count = self.submit_card_refinement(tasks, young)?;
+        self.complete_card_refinement(count)
+    }
+
+    pub(crate) fn submit_card_refinement(
+        &mut self,
+        tasks: Vec<CardRefinementTask>,
+        young: &Arc<BTreeSet<ManagedReference>>,
+    ) -> Result<usize, RuntimeFailure> {
         let count = tasks.len();
         for task in tasks {
             let sequence = self.next_sequence()?;
@@ -307,6 +328,13 @@ impl BackgroundWorkerPool {
                 young: Arc::clone(young),
             })?;
         }
+        Ok(count)
+    }
+
+    pub(crate) fn complete_card_refinement(
+        &mut self,
+        count: usize,
+    ) -> Result<BTreeMap<ManagedReference, Vec<ManagedReference>>, RuntimeFailure> {
         let results = self.collect(count)?;
         let mut refined = BTreeMap::new();
         for result in results {
@@ -341,6 +369,14 @@ impl BackgroundWorkerPool {
         &mut self,
         references: Vec<ManagedReference>,
     ) -> Result<Vec<ManagedReference>, RuntimeFailure> {
+        let count = self.submit_sweep(references)?;
+        self.complete_sweep(count)
+    }
+
+    pub(crate) fn submit_sweep(
+        &mut self,
+        references: Vec<ManagedReference>,
+    ) -> Result<usize, RuntimeFailure> {
         let count = references.len();
         for reference in references {
             let sequence = self.next_sequence()?;
@@ -349,6 +385,13 @@ impl BackgroundWorkerPool {
                 reference,
             })?;
         }
+        Ok(count)
+    }
+
+    pub(crate) fn complete_sweep(
+        &mut self,
+        count: usize,
+    ) -> Result<Vec<ManagedReference>, RuntimeFailure> {
         let results = self.collect(count)?;
         let mut swept = Vec::with_capacity(count);
         for result in results {
@@ -524,12 +567,23 @@ fn evacuate(
     relocations: &BTreeMap<ManagedReference, ManagedReference>,
 ) -> WorkerOutcome {
     let mut fields_updated = 0usize;
-    for slot in task.allocation.allocation.object_map.reference_slots() {
-        let value = &mut task.allocation.allocation.slots[slot.raw() as usize];
+    for slot in task.allocation.allocation.object_map.iter_reference_slots() {
+        let index = slot.raw() as usize;
+        let value = task
+            .allocation
+            .allocation
+            .slots
+            .get(index)
+            .expect("verified evacuation slot");
         if let Some(reference) = value.as_reference()
             && let Some(destination) = relocations.get(&reference)
         {
-            *value = SlotValue::reference(Some(*destination));
+            let changed = task
+                .allocation
+                .allocation
+                .slots
+                .set(index, SlotValue::reference(Some(*destination)));
+            debug_assert!(changed);
             fields_updated = fields_updated.saturating_add(1);
         }
     }
@@ -542,8 +596,8 @@ fn evacuate(
 
 fn refine_card(task: &CardRefinementTask, young: &BTreeSet<ManagedReference>) -> WorkerOutcome {
     let mut children = Vec::new();
-    for slot in task.allocation.object_map.reference_slots() {
-        let Some(value) = task.allocation.slots.get(slot.raw() as usize).copied() else {
+    for slot in task.allocation.object_map.iter_reference_slots() {
+        let Some(value) = task.allocation.slots.get(slot.raw() as usize) else {
             return WorkerOutcome::RefinedCard {
                 owner: task.owner,
                 children: Err(()),

@@ -8,6 +8,7 @@ use pop_source::SourceFile;
 use pop_types::{IntegerKind, IntegerValue};
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn compiler_generated_codec_entries_round_trip_reject_malformed_and_consume_sequential_values() {
     let source = SourceFile::new(
         FileId::from_raw(0),

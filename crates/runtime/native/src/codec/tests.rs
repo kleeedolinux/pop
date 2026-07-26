@@ -24,12 +24,12 @@ mod tests {
         let status = unsafe {
             pop_rt_codec_read_event(
                 reader,
-                &mut tag,
-                &mut ordinal,
-                &mut label,
-                &mut label_length,
-                &mut auxiliary,
-                &mut scalar,
+                &raw mut tag,
+                &raw mut ordinal,
+                &raw mut label,
+                &raw mut label_length,
+                &raw mut auxiliary,
+                &raw mut scalar,
             )
         };
         let Some(status) = CodecEventStatus::from_raw(status) else {

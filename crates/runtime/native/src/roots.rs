@@ -74,6 +74,17 @@ pub fn request_abi_collection() -> bool {
     true
 }
 
+/// Requests one native moving-nursery cycle for ABI 2 proof and stress tests.
+#[doc(hidden)]
+#[must_use]
+pub fn request_abi_relocation() -> bool {
+    let Ok(mut runtime) = lock_abi_runtime() else {
+        return false;
+    };
+    runtime.request_relocation();
+    true
+}
+
 #[must_use]
 pub fn abi_safe_point(safe_point: u32, roots: &[u64]) -> u8 {
     if roots.len() > u32::MAX as usize {
