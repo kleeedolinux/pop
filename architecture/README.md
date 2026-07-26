@@ -117,6 +117,9 @@ transplanted into a Luau-shaped file.
 - Public-library APIs optimize for short direct call sites and explicit cost;
   convenience cannot hide allocation, copying, dispatch, authority, or native
   transitions.
+- The complete modern foundation is the canonical essential-library profile:
+  every `standard`-tier root plus explicit `Pop.Http` HTTP/WebSocket support.
+  Planned names and placeholder declarations never count as implementation.
 - The `Pop` prelude is fixed, curated, and automatically available; ordinary
   standard-library use requires no `using` directives.
 - Namespace declarations use explicit `public`, `internal`, or `private`

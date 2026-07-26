@@ -214,6 +214,14 @@ artifact schemas and is not a production runtime dependency.
 - [Representative API examples](./22.5-standard-library-api-examples.md)
 - [Implementation and migration plan](./22.6-standard-library-implementation-plan.md)
 
+ADR 0110 makes the modern foundation delivery scope machine-auditable. It
+contains every root whose tier includes `standard`, plus the separately
+versioned `Pop.Http` ownership of `Http` and `WebSocket`. This completion profile
+does not make a planned catalog row executable and rejects namespace shells,
+metadata-only declarations, and always-unsupported placeholders as evidence.
+See
+[the essential-library projection](../libraries/catalog/essential-libraries.tsv).
+
 ## Complete planned public root inventory
 
 The following is the only authoritative root list. Catalog documents may define

@@ -168,9 +168,10 @@ linking remain ordinary-workflow blockers in section 4.
     phase, and architecture conformance snapshot without adding either root to
     the frozen prelude or implemented API baseline.
 
-The broad catalog after the standard foundation remains planned work. It is not
-necessary to implement every format, network, media, data, tooling, or AI
-Package for the first release.
+ADR 0110 supersedes the earlier narrow release boundary for the modern
+foundation. Every standard-tier family plus explicit HTTP/WebSocket support is
+required as real tested behavior; empty namespaces and metadata-only stubs do
+not count.
 
 Post-baseline library work has begun without widening the release foundation:
 
@@ -196,6 +197,23 @@ Post-baseline library work has begun without widening the release foundation:
   before adding no-fallback sequence inspection.
 - Complete LLVM aggregate representation for collections whose element is
   optional; MIR already preserves the typed optional item contract.
+
+#### Complete the modern essential libraries
+
+- [ ] Complete core values: `Math`, `Random`, `Guid`, `Version`, `Uri`, `Mime`,
+  `Sequence`, `Bytes`, `Unicode`, and `Text`.
+- [ ] Complete formats and deterministic data boundaries: `Codec`, `Metadata`,
+  `Json`, `Yaml`, `Xml`, `Csv`, `Toml`, `Regex`, `Glob`, `Locale`, `Resource`,
+  and `Time`.
+- [ ] Complete portable and target-qualified host foundations: `Io`, `Path`,
+  `Memory`, `File`, `Directory`, `Process`, `Environment`, `Platform`, and
+  `Terminal`.
+- [ ] Complete structured concurrency and secure network foundations: `Task`,
+  `Channel`, `Atomic`, `Actor`, `Crypto`, `Socket`, and `Net`.
+- [ ] Complete standard `Telemetry` contracts with deterministic no-op and test
+  sinks.
+- [ ] Build the independent `Pop.Http` Package with bounded HTTP/1.1 and
+  WebSocket client/server essentials over the typed standard network layer.
 
 ### 3. Make the runtime release-ready
 

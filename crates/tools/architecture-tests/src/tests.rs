@@ -1883,6 +1883,113 @@ fn public_library_root_manifest_matches_the_authoritative_catalog() {
     }
 }
 
+#[test]
+fn essential_library_profile_covers_the_complete_modern_foundation() {
+    let root = repository_root();
+    let public_manifest = read_required(root.join("libraries/catalog/public-roots.tsv"));
+    let mut public_rows = BTreeMap::new();
+    for line in public_manifest
+        .lines()
+        .skip(2)
+        .filter(|line| !line.is_empty())
+    {
+        let columns = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(columns.len(), 4, "invalid public root row: {line}");
+        public_rows.insert(
+            columns[0].to_owned(),
+            (columns[1].to_owned(), columns[3].to_owned()),
+        );
+    }
+    let mut expected = public_rows
+        .iter()
+        .filter(|(_, (tier, _))| tier.split('/').any(|part| part == "standard"))
+        .map(|(public_root, _)| public_root.clone())
+        .collect::<BTreeSet<_>>();
+    expected.extend(["Http".to_owned(), "WebSocket".to_owned()]);
+
+    let profile = read_required(root.join("libraries/catalog/essential-libraries.tsv"));
+    let mut lines = profile.lines();
+    assert_eq!(lines.next(), Some("schemaVersion\t1"));
+    assert_eq!(
+        lines.next(),
+        Some("publicRoot\tpackage\tdeliveryGroup\tstatus\tauthority")
+    );
+    assert!(profile.ends_with('\n'));
+
+    let allowed_groups = [
+        "concurrencyNetwork",
+        "core",
+        "formats",
+        "host",
+        "networkProtocol",
+        "operations",
+    ];
+    let allowed_statuses = ["implemented", "partial", "planned"];
+    let baseline = read_required(root.join("libraries/standard/bootstrap/api-baseline.tsv"));
+    let mut actual = BTreeSet::new();
+    let mut previous = None;
+    for line in lines.filter(|line| !line.is_empty()) {
+        let columns = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(columns.len(), 5, "invalid essential-library row: {line}");
+        let [public_root, package, group, status, authority] = columns.as_slice() else {
+            unreachable!("column count checked above")
+        };
+        assert!(
+            previous.is_none_or(|previous: &str| previous < *public_root),
+            "essential-library rows must be strictly sorted"
+        );
+        previous = Some(public_root);
+        assert!(
+            actual.insert((*public_root).to_owned()),
+            "duplicate essential root `{public_root}`"
+        );
+        assert!(
+            allowed_groups.contains(group),
+            "unknown delivery group `{group}`"
+        );
+        assert!(
+            allowed_statuses.contains(status),
+            "unknown status `{status}`"
+        );
+        let expected_package = if matches!(*public_root, "Http" | "WebSocket") {
+            "Pop.Http"
+        } else {
+            "Pop.Standard"
+        };
+        assert_eq!(
+            *package, expected_package,
+            "wrong owner for `{public_root}`"
+        );
+        assert!(
+            authority.starts_with("architecture/")
+                && !authority.contains("..")
+                && root.join(authority).is_file(),
+            "missing or unsafe authority for `{public_root}`: `{authority}`"
+        );
+
+        if *status == "partial" {
+            let namespace = format!("\tPop.{public_root}\t");
+            assert!(
+                baseline.contains(&namespace),
+                "partial family `{public_root}` lacks executable API-baseline evidence"
+            );
+        }
+        if *status == "implemented" {
+            assert_eq!(
+                public_rows
+                    .get(*public_root)
+                    .map(|(_, status)| status.as_str()),
+                Some("implemented"),
+                "implemented essential family `{public_root}` must advance the public root manifest"
+            );
+        }
+    }
+    assert_eq!(
+        actual, expected,
+        "essential profile must contain every standard root plus Http/WebSocket"
+    );
+}
+
 fn parse_root_inventory(
     index: &str,
 ) -> (
