@@ -51,8 +51,33 @@ fn frozen_foundation_baseline_and_delivery_status_stay_consistent() {
         .split_once("### 3. Make the runtime release-ready")
         .expect("runtime roadmap section follows the standard foundation")
         .0;
+    let (frozen_foundation, modern_essential) = section
+        .split_once("#### Complete the modern essential libraries")
+        .expect("ADR 0110 modern essential-library boundary");
     assert!(
-        !section.contains("- [ ]"),
-        "section 2 must not claim unresolved work after its accepted completion boundary"
+        !frozen_foundation.contains("- [ ]"),
+        "the frozen bootstrap foundation must remain complete"
     );
+    let open_groups = modern_essential
+        .lines()
+        .filter(|line| line.starts_with("- [ ]"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        open_groups.len(),
+        6,
+        "ADR 0110 keeps all six modern delivery groups open until their exact profiles complete"
+    );
+    for required in [
+        "Complete core values:",
+        "Complete formats and deterministic data boundaries:",
+        "Complete portable and target-qualified host foundations:",
+        "Complete structured concurrency and secure network foundations:",
+        "Complete standard `Telemetry` contracts",
+        "Build the independent `Pop.Http` Package",
+    ] {
+        assert!(
+            open_groups.iter().any(|line| line.contains(required)),
+            "missing open modern-foundation delivery group `{required}`"
+        );
+    }
 }
