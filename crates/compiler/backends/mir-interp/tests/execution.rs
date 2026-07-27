@@ -8,8 +8,9 @@ use pop_foundation::{
     SymbolId, UnionCaseId,
 };
 use pop_mir::{lower_hir_bubble, optimize_mir, parse_mir_dump};
+use pop_runtime_collector::GenerationalRuntime;
 use pop_runtime_interface::{
-    ForeignAddress, PanicKind, RuntimeFailure, Trap, TrapKind, UnwindReason,
+    ForeignAddress, PanicKind, RuntimeAdapter, RuntimeFailure, Trap, TrapKind, UnwindReason,
 };
 use pop_source::SourceFile;
 use pop_types::{FloatKind, FloatValue, IntegerKind, IntegerValue};
@@ -1331,6 +1332,110 @@ fn ordinary_pop_integer_math_is_portable_and_checked() {
     assert_eq!(
         interpreter.call(floor_remainder.symbol(), &[int(i64::MIN), int(-1)]),
         Err(trap(TrapKind::IntegerOverflow))
+    );
+}
+
+#[test]
+fn ordinary_pop_bytes_inspection_and_endian_reads_are_portable() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .expect("backend crate is under the repository root");
+    let bytes_source =
+        std::fs::read_to_string(root.join("crates/libraries/standard/pop/src/bytes.pop"))
+            .expect("read Pop.Bytes source");
+    let (mir, types) = executable_modules(&[
+        ("src/bytes.pop", bytes_source.as_str()),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Bytes\n\
+             public function inspect(value: Bytes, equalValue: Bytes, prefix: Bytes, suffix: Bytes, empty: Bytes, maximum: Bytes): Int\n\
+                 local view = Bytes.view(value)\n\
+                 local equalView = Bytes.view(equalValue)\n\
+                 local prefixView = Bytes.view(prefix)\n\
+                 local suffixView = Bytes.view(suffix)\n\
+                 local emptyView = Bytes.view(empty)\n\
+                 local maximumView = Bytes.view(maximum)\n\
+                 if not equals(view, equalView) or compare(view, equalView) ~= 0 then\n\
+                     return 1\n\
+                 end\n\
+                 if compare(prefixView, view) ~= -1 or compare(view, prefixView) ~= 1 then\n\
+                     return 2\n\
+                 end\n\
+                 if not startsWith(view, prefixView) or not endsWith(view, suffixView) then\n\
+                     return 3\n\
+                 end\n\
+                 if not contains(view, 255) or (indexOf(view, 255, 1) ?? 0) ~= 5 then\n\
+                     return 4\n\
+                 end\n\
+                 if indexOf(view, 1, 0) ~= nil or indexOf(view, 7, 1) ~= nil then\n\
+                     return 5\n\
+                 end\n\
+                 if (readUInt16BigEndian(view, 1) ?? 0) ~= 258 or (readUInt16LittleEndian(view, 1) ?? 0) ~= 513 then\n\
+                     return 6\n\
+                 end\n\
+                 if (readUInt32BigEndian(view, 1) ?? 0) ~= 16909060 or (readUInt32LittleEndian(view, 1) ?? 0) ~= 67305985 then\n\
+                     return 7\n\
+                 end\n\
+                 if (readUInt64BigEndian(view, 1) ?? 0) ~= 72623863984324672 or (readUInt64LittleEndian(view, 1) ?? 0) ~= 4647715910730318337 then\n\
+                     return 8\n\
+                 end\n\
+                 if readUInt16BigEndian(view, 8) ~= nil or readUInt64LittleEndian(view, 2) ~= nil then\n\
+                     return 9\n\
+                 end\n\
+                 if not equals(emptyView, emptyView) or compare(emptyView, prefixView) ~= -1 or not startsWith(view, emptyView) or not endsWith(view, emptyView) then\n\
+                     return 10\n\
+                 end\n\
+                 if contains(emptyView, 0) or indexOf(emptyView, 0, 1) ~= nil or readUInt16BigEndian(view, -1) ~= nil or readUInt16BigEndian(view, 9223372036854775807) ~= nil then\n\
+                     return 11\n\
+                 end\n\
+                 if (readUInt16BigEndian(view, 2) ?? 0) ~= 515 or (readUInt16LittleEndian(view, 2) ?? 0) ~= 770 then\n\
+                     return 12\n\
+                 end\n\
+                 if (readUInt16BigEndian(maximumView, 1) ?? 0) ~= 65535 or (readUInt32LittleEndian(maximumView, 1) ?? 0) ~= 4294967295 or (readUInt64BigEndian(maximumView, 1) ?? 0) ~= 18446744073709551615 then\n\
+                     return 13\n\
+                 end\n\
+                 return 42\n\
+             end\n",
+        ),
+    ]);
+    let entry = mir.functions().last().expect("Bytes consumer").symbol();
+    let mut runtime = GenerationalRuntime::new();
+    let value = runtime
+        .allocate_immutable_bytes(&[1, 2, 3, 4, 255, 0, 128, 64])
+        .expect("value Bytes");
+    let equal = runtime
+        .allocate_immutable_bytes(&[1, 2, 3, 4, 255, 0, 128, 64])
+        .expect("equal Bytes");
+    let prefix = runtime
+        .allocate_immutable_bytes(&[1, 2])
+        .expect("prefix Bytes");
+    let suffix = runtime
+        .allocate_immutable_bytes(&[128, 64])
+        .expect("suffix Bytes");
+    let empty = runtime.allocate_immutable_bytes(&[]).expect("empty Bytes");
+    let maximum = runtime
+        .allocate_immutable_bytes(&[255, 255, 255, 255, 255, 255, 255, 255])
+        .expect("maximum Bytes");
+    let interpreter =
+        MirInterpreter::with_runtime(&mir, &types, runtime).expect("verified Bytes MIR");
+
+    assert_eq!(
+        interpreter
+            .call(
+                entry,
+                &[
+                    MirValue::Bytes(value),
+                    MirValue::Bytes(equal),
+                    MirValue::Bytes(prefix),
+                    MirValue::Bytes(suffix),
+                    MirValue::Bytes(empty),
+                    MirValue::Bytes(maximum),
+                ],
+            )
+            .expect("portable Bytes execution"),
+        vec![int(42)]
     );
 }
 

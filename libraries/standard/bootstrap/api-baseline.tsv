@@ -115,3 +115,15 @@ api:58	Api	Pop.Standard	Pop.Math	clamp	clamp(Int,Int,Int)->Int?	standard	prototy
 api:59	Api	Pop.Standard	Pop.Math	power	power(Int,Int)->Int?	standard	prototype	false	architecture/decisions/0111-essential-integer-math-completion.md
 api:60	Api	Pop.Standard	Pop.Math	floorDivide	floorDivide(Int,Int)->Int	standard	prototype	false	architecture/decisions/0111-essential-integer-math-completion.md
 api:61	Api	Pop.Standard	Pop.Math	floorRemainder	floorRemainder(Int,Int)->Int	standard	prototype	false	architecture/decisions/0111-essential-integer-math-completion.md
+api:62	Api	Pop.Standard	Pop.Bytes	equals	equals(Bytes.View,Bytes.View)->Boolean	standard	prototype	false	architecture/decisions/0113-portable-bytes-inspection-and-endian-reads.md
+api:63	Api	Pop.Standard	Pop.Bytes	compare	compare(Bytes.View,Bytes.View)->Int	standard	prototype	false	architecture/decisions/0113-portable-bytes-inspection-and-endian-reads.md
+api:64	Api	Pop.Standard	Pop.Bytes	startsWith	startsWith(Bytes.View,Bytes.View)->Boolean	standard	prototype	false	architecture/decisions/0113-portable-bytes-inspection-and-endian-reads.md
+api:65	Api	Pop.Standard	Pop.Bytes	endsWith	endsWith(Bytes.View,Bytes.View)->Boolean	standard	prototype	false	architecture/decisions/0113-portable-bytes-inspection-and-endian-reads.md
+api:66	Api	Pop.Standard	Pop.Bytes	contains	contains(Bytes.View,Byte)->Boolean	standard	prototype	false	architecture/decisions/0113-portable-bytes-inspection-and-endian-reads.md
+api:67	Api	Pop.Standard	Pop.Bytes	indexOf	indexOf(Bytes.View,Byte,Int)->Int?	standard	prototype	false	architecture/decisions/0113-portable-bytes-inspection-and-endian-reads.md
+api:68	Api	Pop.Standard	Pop.Bytes	readUInt16BigEndian	readUInt16BigEndian(Bytes.View,Int)->UInt16?	standard	prototype	false	architecture/decisions/0113-portable-bytes-inspection-and-endian-reads.md
+api:69	Api	Pop.Standard	Pop.Bytes	readUInt16LittleEndian	readUInt16LittleEndian(Bytes.View,Int)->UInt16?	standard	prototype	false	architecture/decisions/0113-portable-bytes-inspection-and-endian-reads.md
+api:70	Api	Pop.Standard	Pop.Bytes	readUInt32BigEndian	readUInt32BigEndian(Bytes.View,Int)->UInt32?	standard	prototype	false	architecture/decisions/0113-portable-bytes-inspection-and-endian-reads.md
+api:71	Api	Pop.Standard	Pop.Bytes	readUInt32LittleEndian	readUInt32LittleEndian(Bytes.View,Int)->UInt32?	standard	prototype	false	architecture/decisions/0113-portable-bytes-inspection-and-endian-reads.md
+api:72	Api	Pop.Standard	Pop.Bytes	readUInt64BigEndian	readUInt64BigEndian(Bytes.View,Int)->UInt64?	standard	prototype	false	architecture/decisions/0113-portable-bytes-inspection-and-endian-reads.md
+api:73	Api	Pop.Standard	Pop.Bytes	readUInt64LittleEndian	readUInt64LittleEndian(Bytes.View,Int)->UInt64?	standard	prototype	false	architecture/decisions/0113-portable-bytes-inspection-and-endian-reads.md

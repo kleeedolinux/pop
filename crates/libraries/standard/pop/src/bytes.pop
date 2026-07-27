@@ -1,0 +1,490 @@
+namespace Pop.Bytes
+
+--- <summary>
+--- Tests whether two byte views contain the same bytes.
+--- </summary>
+---
+--- <param name="left">
+--- The first byte view.
+--- </param>
+---
+--- <param name="right">
+--- The second byte view.
+--- </param>
+---
+--- <returns>
+--- True when both views have the same length and byte values; otherwise false.
+--- </returns>
+---
+--- <remarks>
+--- Comparison stops at the first mismatch and does not materialize either view.
+--- </remarks>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate or copy byte storage.
+--- </allocation>
+public function equals(left: Bytes.View, right: Bytes.View): Boolean
+    local length = Bytes.length(left)
+    if length ~= Bytes.length(right) then
+        return false
+    end
+    for index = 1, length do
+        if (Bytes.get(left, index) ?? 0) ~= (Bytes.get(right, index) ?? 0) then
+            return false
+        end
+    end
+    return true
+end
+
+--- <summary>
+--- Compares two byte views in unsigned-byte lexicographic order.
+--- </summary>
+---
+--- <param name="left">
+--- The first byte view.
+--- </param>
+---
+--- <param name="right">
+--- The second byte view.
+--- </param>
+---
+--- <returns>
+--- Negative one when left sorts first, zero when equal, or positive one when left sorts after right.
+--- </returns>
+---
+--- <remarks>
+--- Comparison stops at the first decisive byte. A proper prefix sorts before the longer view.
+--- </remarks>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate or copy byte storage.
+--- </allocation>
+public function compare(left: Bytes.View, right: Bytes.View): Int
+    local leftLength = Bytes.length(left)
+    local rightLength = Bytes.length(right)
+    local commonLength = leftLength
+    if rightLength < commonLength then
+        commonLength = rightLength
+    end
+    for index = 1, commonLength do
+        local leftByte = Bytes.get(left, index) ?? 0
+        local rightByte = Bytes.get(right, index) ?? 0
+        if leftByte < rightByte then
+            return -1
+        end
+        if leftByte > rightByte then
+            return 1
+        end
+    end
+    if leftLength < rightLength then
+        return -1
+    end
+    if leftLength > rightLength then
+        return 1
+    end
+    return 0
+end
+
+--- <summary>
+--- Tests whether a byte view begins with a prefix.
+--- </summary>
+---
+--- <param name="value">
+--- The byte view to inspect.
+--- </param>
+---
+--- <param name="prefix">
+--- The prefix to match.
+--- </param>
+---
+--- <returns>
+--- True when every prefix byte matches at the start of value; otherwise false.
+--- </returns>
+---
+--- <remarks>
+--- An empty prefix matches every value, including an empty value.
+--- </remarks>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate or copy byte storage.
+--- </allocation>
+public function startsWith(value: Bytes.View, prefix: Bytes.View): Boolean
+    local prefixLength = Bytes.length(prefix)
+    if prefixLength > Bytes.length(value) then
+        return false
+    end
+    for index = 1, prefixLength do
+        if (Bytes.get(value, index) ?? 0) ~= (Bytes.get(prefix, index) ?? 0) then
+            return false
+        end
+    end
+    return true
+end
+
+--- <summary>
+--- Tests whether a byte view ends with a suffix.
+--- </summary>
+---
+--- <param name="value">
+--- The byte view to inspect.
+--- </param>
+---
+--- <param name="suffix">
+--- The suffix to match.
+--- </param>
+---
+--- <returns>
+--- True when every suffix byte matches at the end of value; otherwise false.
+--- </returns>
+---
+--- <remarks>
+--- An empty suffix matches every value, including an empty value.
+--- </remarks>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate or copy byte storage.
+--- </allocation>
+public function endsWith(value: Bytes.View, suffix: Bytes.View): Boolean
+    local valueLength = Bytes.length(value)
+    local suffixLength = Bytes.length(suffix)
+    if suffixLength > valueLength then
+        return false
+    end
+    local start = valueLength - suffixLength + 1
+    for offset = 0, suffixLength - 1 do
+        if (Bytes.get(value, start + offset) ?? 0) ~= (Bytes.get(suffix, offset + 1) ?? 0) then
+            return false
+        end
+    end
+    return true
+end
+
+--- <summary>
+--- Tests whether a byte view contains a byte value.
+--- </summary>
+---
+--- <param name="value">
+--- The byte view to search.
+--- </param>
+---
+--- <param name="byte">
+--- The byte value to find.
+--- </param>
+---
+--- <returns>
+--- True when the byte occurs in the view; otherwise false.
+--- </returns>
+---
+--- <remarks>
+--- Search proceeds from the first byte and stops at the first match.
+--- </remarks>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate or copy byte storage.
+--- </allocation>
+public function contains(value: Bytes.View, byte: Byte): Boolean
+    local length = Bytes.length(value)
+    for index = 1, length do
+        if (Bytes.get(value, index) ?? 0) == byte then
+            return true
+        end
+    end
+    return false
+end
+
+--- <summary>
+--- Finds the first byte at or after a one-based start index.
+--- </summary>
+---
+--- <param name="value">
+--- The byte view to search.
+--- </param>
+---
+--- <param name="byte">
+--- The byte value to find.
+--- </param>
+---
+--- <param name="start">
+--- The one-based index at which search begins.
+--- </param>
+---
+--- <returns>
+--- The first matching one-based index, or nil for an invalid start or no match.
+--- </returns>
+---
+--- <remarks>
+--- Search stops at the first match and never raises a bounds trap.
+--- </remarks>
+---
+--- <complexity time="O(n)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate or copy byte storage.
+--- </allocation>
+public function indexOf(value: Bytes.View, byte: Byte, start: Int): Int?
+    local length = Bytes.length(value)
+    if start < 1 or start > length then
+        return nil
+    end
+    for index = start, length do
+        local current = Bytes.get(value, index)?
+        if current == byte then
+            return index
+        end
+    end
+    return nil
+end
+
+--- <summary>
+--- Reads a two-byte unsigned integer in big-endian order.
+--- </summary>
+---
+--- <param name="value">
+--- The byte view to read.
+--- </param>
+---
+--- <param name="start">
+--- The one-based index of the first byte.
+--- </param>
+---
+--- <returns>
+--- The decoded value, or nil when two consecutive bytes are unavailable.
+--- </returns>
+---
+--- <remarks>
+--- The first byte is most significant. The read never pads input or raises a bounds trap.
+--- </remarks>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate or copy byte storage.
+--- </allocation>
+public function readUInt16BigEndian(value: Bytes.View, start: Int): UInt16?
+    if start < 1 then
+        return nil
+    end
+    local length = Bytes.length(value)
+    if start > length or 1 > length - start then
+        return nil
+    end
+    local first = UInt16(Bytes.get(value, start)?)
+    local second = UInt16(Bytes.get(value, start + 1)?)
+    return first * 256 + second
+end
+
+--- <summary>
+--- Reads a two-byte unsigned integer in little-endian order.
+--- </summary>
+---
+--- <param name="value">
+--- The byte view to read.
+--- </param>
+---
+--- <param name="start">
+--- The one-based index of the first byte.
+--- </param>
+---
+--- <returns>
+--- The decoded value, or nil when two consecutive bytes are unavailable.
+--- </returns>
+---
+--- <remarks>
+--- The first byte is least significant. The read never pads input or raises a bounds trap.
+--- </remarks>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate or copy byte storage.
+--- </allocation>
+public function readUInt16LittleEndian(value: Bytes.View, start: Int): UInt16?
+    if start < 1 then
+        return nil
+    end
+    local length = Bytes.length(value)
+    if start > length or 1 > length - start then
+        return nil
+    end
+    local first = UInt16(Bytes.get(value, start)?)
+    local second = UInt16(Bytes.get(value, start + 1)?)
+    return second * 256 + first
+end
+
+--- <summary>
+--- Reads a four-byte unsigned integer in big-endian order.
+--- </summary>
+---
+--- <param name="value">
+--- The byte view to read.
+--- </param>
+---
+--- <param name="start">
+--- The one-based index of the first byte.
+--- </param>
+---
+--- <returns>
+--- The decoded value, or nil when four consecutive bytes are unavailable.
+--- </returns>
+---
+--- <remarks>
+--- The first byte is most significant. The read never pads input or raises a bounds trap.
+--- </remarks>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate or copy byte storage.
+--- </allocation>
+public function readUInt32BigEndian(value: Bytes.View, start: Int): UInt32?
+    if start < 1 then
+        return nil
+    end
+    local length = Bytes.length(value)
+    if start > length or 3 > length - start then
+        return nil
+    end
+    local first = UInt32(Bytes.get(value, start)?)
+    local second = UInt32(Bytes.get(value, start + 1)?)
+    local third = UInt32(Bytes.get(value, start + 2)?)
+    local fourth = UInt32(Bytes.get(value, start + 3)?)
+    return ((first * 256 + second) * 256 + third) * 256 + fourth
+end
+
+--- <summary>
+--- Reads a four-byte unsigned integer in little-endian order.
+--- </summary>
+---
+--- <param name="value">
+--- The byte view to read.
+--- </param>
+---
+--- <param name="start">
+--- The one-based index of the first byte.
+--- </param>
+---
+--- <returns>
+--- The decoded value, or nil when four consecutive bytes are unavailable.
+--- </returns>
+---
+--- <remarks>
+--- The first byte is least significant. The read never pads input or raises a bounds trap.
+--- </remarks>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate or copy byte storage.
+--- </allocation>
+public function readUInt32LittleEndian(value: Bytes.View, start: Int): UInt32?
+    if start < 1 then
+        return nil
+    end
+    local length = Bytes.length(value)
+    if start > length or 3 > length - start then
+        return nil
+    end
+    local first = UInt32(Bytes.get(value, start)?)
+    local second = UInt32(Bytes.get(value, start + 1)?)
+    local third = UInt32(Bytes.get(value, start + 2)?)
+    local fourth = UInt32(Bytes.get(value, start + 3)?)
+    return ((fourth * 256 + third) * 256 + second) * 256 + first
+end
+
+--- <summary>
+--- Reads an eight-byte unsigned integer in big-endian order.
+--- </summary>
+---
+--- <param name="value">
+--- The byte view to read.
+--- </param>
+---
+--- <param name="start">
+--- The one-based index of the first byte.
+--- </param>
+---
+--- <returns>
+--- The decoded value, or nil when eight consecutive bytes are unavailable.
+--- </returns>
+---
+--- <remarks>
+--- The first byte is most significant. The read never pads input or raises a bounds trap.
+--- </remarks>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate or copy byte storage.
+--- </allocation>
+public function readUInt64BigEndian(value: Bytes.View, start: Int): UInt64?
+    if start < 1 then
+        return nil
+    end
+    local length = Bytes.length(value)
+    if start > length or 7 > length - start then
+        return nil
+    end
+    local first = UInt64(Bytes.get(value, start)?)
+    local second = UInt64(Bytes.get(value, start + 1)?)
+    local third = UInt64(Bytes.get(value, start + 2)?)
+    local fourth = UInt64(Bytes.get(value, start + 3)?)
+    local fifth = UInt64(Bytes.get(value, start + 4)?)
+    local sixth = UInt64(Bytes.get(value, start + 5)?)
+    local seventh = UInt64(Bytes.get(value, start + 6)?)
+    local eighth = UInt64(Bytes.get(value, start + 7)?)
+    return ((((((first * 256 + second) * 256 + third) * 256 + fourth) * 256 + fifth) * 256 + sixth) * 256 + seventh) * 256 + eighth
+end
+
+--- <summary>
+--- Reads an eight-byte unsigned integer in little-endian order.
+--- </summary>
+---
+--- <param name="value">
+--- The byte view to read.
+--- </param>
+---
+--- <param name="start">
+--- The one-based index of the first byte.
+--- </param>
+---
+--- <returns>
+--- The decoded value, or nil when eight consecutive bytes are unavailable.
+--- </returns>
+---
+--- <remarks>
+--- The first byte is least significant. The read never pads input or raises a bounds trap.
+--- </remarks>
+---
+--- <complexity time="O(1)" space="O(1)"/>
+---
+--- <allocation>
+--- Does not allocate or copy byte storage.
+--- </allocation>
+public function readUInt64LittleEndian(value: Bytes.View, start: Int): UInt64?
+    if start < 1 then
+        return nil
+    end
+    local length = Bytes.length(value)
+    if start > length or 7 > length - start then
+        return nil
+    end
+    local first = UInt64(Bytes.get(value, start)?)
+    local second = UInt64(Bytes.get(value, start + 1)?)
+    local third = UInt64(Bytes.get(value, start + 2)?)
+    local fourth = UInt64(Bytes.get(value, start + 3)?)
+    local fifth = UInt64(Bytes.get(value, start + 4)?)
+    local sixth = UInt64(Bytes.get(value, start + 5)?)
+    local seventh = UInt64(Bytes.get(value, start + 6)?)
+    local eighth = UInt64(Bytes.get(value, start + 7)?)
+    return ((((((eighth * 256 + seventh) * 256 + sixth) * 256 + fifth) * 256 + fourth) * 256 + third) * 256 + second) * 256 + first
+end

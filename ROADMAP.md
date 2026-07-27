@@ -193,6 +193,10 @@ Post-baseline library work has begun without widening the release foundation:
   reduction prototypes with exact callback and cross-backend coverage.
 - [x] Define and implement view lifetimes before exposing `Bytes.View` or
   `Text.View`.
+- [x] Add ADR 0113 allocation-free `Bytes.View` comparison, byte search, and
+  checked `UInt16`/`UInt32`/`UInt64` endian-read prototypes with
+  interpreter/LLVM differential coverage; keep `Bytes` partial until reusable
+  buffers, writes, bit operations, and codecs pass their separate gates.
 - Make reserved `Iteration<T>` exhaustively matchable in ordinary source
   before adding no-fallback sequence inspection.
 - Complete LLVM aggregate representation for collections whose element is

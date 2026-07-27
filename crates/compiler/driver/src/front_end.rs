@@ -1468,6 +1468,46 @@ fn statement_proves_no_view_retention(statement: &StatementSyntax) -> bool {
                 && then_body.iter().all(statement_proves_no_view_retention)
                 && else_body.iter().all(statement_proves_no_view_retention)
         }
+        StatementSyntaxKind::OptionalIf {
+            initializer,
+            then_body,
+            else_body,
+            ..
+        } => {
+            expression_proves_no_view_retention(initializer)
+                && then_body.iter().all(statement_proves_no_view_retention)
+                && else_body.iter().all(statement_proves_no_view_retention)
+        }
+        StatementSyntaxKind::While { condition, body }
+        | StatementSyntaxKind::RepeatUntil { condition, body } => {
+            expression_proves_no_view_retention(condition)
+                && body.iter().all(statement_proves_no_view_retention)
+        }
+        StatementSyntaxKind::OptionalWhile {
+            initializer, body, ..
+        } => {
+            expression_proves_no_view_retention(initializer)
+                && body.iter().all(statement_proves_no_view_retention)
+        }
+        StatementSyntaxKind::NumericFor {
+            first,
+            last,
+            step,
+            body,
+            ..
+        } => {
+            expression_proves_no_view_retention(first)
+                && expression_proves_no_view_retention(last)
+                && step
+                    .as_ref()
+                    .is_none_or(expression_proves_no_view_retention)
+                && body.iter().all(statement_proves_no_view_retention)
+        }
+        StatementSyntaxKind::Assignment { target, value, .. } => {
+            matches!(target.kind(), ExpressionSyntaxKind::Name(_))
+                && expression_proves_no_view_retention(value)
+        }
+        StatementSyntaxKind::Break | StatementSyntaxKind::Continue => true,
         StatementSyntaxKind::Expression(expression) => {
             expression_proves_no_view_retention(expression)
         }
@@ -1491,6 +1531,7 @@ fn expression_proves_no_view_retention(expression: &ExpressionSyntax) -> bool {
                         if matches!(namespace.as_str(), "Bytes" | "Text")
                             && matches!(operation.as_str(),
                                 "view" | "slice" | "length" | "get" | "toBytes" | "toString"))
+                        || is_scalar_numeric_conversion(path)
             ) && arguments.iter().all(expression_proves_no_view_retention)
         }
         ExpressionSyntaxKind::Unary { operand, .. }
@@ -1512,6 +1553,26 @@ fn expression_proves_no_view_retention(expression: &ExpressionSyntax) -> bool {
         }
         _ => false,
     }
+}
+
+fn is_scalar_numeric_conversion(path: &[String]) -> bool {
+    matches!(
+        path,
+        [name] if matches!(
+            name.as_str(),
+            "Int"
+                | "Int8"
+                | "Int16"
+                | "Int32"
+                | "Int64"
+                | "UInt8"
+                | "UInt16"
+                | "UInt32"
+                | "UInt64"
+                | "Float32"
+                | "Float64"
+        )
+    )
 }
 
 fn define_declarations(

@@ -4097,6 +4097,200 @@ fn emitted_llvm_executes_portable_integer_math() {
 }
 
 #[test]
+fn emitted_llvm_lowers_portable_bytes_inspection_and_endian_reads() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .expect("backend crate is under the repository root");
+    let bytes_source = fs::read_to_string(root.join("crates/libraries/standard/pop/src/bytes.pop"))
+        .expect("read Pop.Bytes source");
+    let module = native_modules(&[
+        ("src/bytes.pop", bytes_source.as_str()),
+        (
+            "src/main.pop",
+            "namespace Main\n\
+             using Pop.Bytes\n\
+             private function main(arguments: Array<String>): Int\n\
+                 return 42\n\
+             end\n",
+        ),
+    ]);
+    let text = module.to_string();
+
+    for operation in ["viewLength", "viewGetByte"] {
+        assert!(
+            !text.contains(operation),
+            "LLVM text must contain backend operations rather than MIR name `{operation}`"
+        );
+    }
+    assert!(
+        text.contains("@pop_rt_bytes_view_lengths")
+            && text.contains("@pop_rt_bytes_view_get")
+            && text.contains("define internal { i1, i16 }")
+            && text.contains("define internal { i1, i32 }")
+            && text.contains("define internal { i1, i64 }"),
+        "portable Bytes functions must lower to typed LLVM view and integer operations:\n{text}"
+    );
+}
+
+const PORTABLE_BYTES_CONSUMER: &str = "namespace Main\n\
+    using Pop.Bytes\n\
+    public function inspect(value: Bytes, equalValue: Bytes, prefix: Bytes, suffix: Bytes, empty: Bytes, maximum: Bytes): Int\n\
+        local view = Bytes.view(value)\n\
+        local equalView = Bytes.view(equalValue)\n\
+        local prefixView = Bytes.view(prefix)\n\
+        local suffixView = Bytes.view(suffix)\n\
+        local emptyView = Bytes.view(empty)\n\
+        local maximumView = Bytes.view(maximum)\n\
+        if not equals(view, equalView) then\n\
+            return 1\n\
+        end\n\
+        if compare(prefixView, view) ~= -1 then\n\
+            return 9\n\
+        end\n\
+        if not startsWith(view, prefixView) or not endsWith(view, suffixView) then\n\
+            return 2\n\
+        end\n\
+        if not contains(view, 255) or (indexOf(view, 255, 1) ?? 0) ~= 5 then\n\
+            return 3\n\
+        end\n\
+        if (readUInt16BigEndian(view, 1) ?? 0) ~= 258 or (readUInt16LittleEndian(view, 2) ?? 0) ~= 770 then\n\
+            return 4\n\
+        end\n\
+        if (readUInt32BigEndian(view, 1) ?? 0) ~= 16909060 or (readUInt64LittleEndian(view, 1) ?? 0) ~= 4647715910730318337 then\n\
+            return 5\n\
+        end\n\
+        if not equals(emptyView, emptyView) or not startsWith(view, emptyView) or not endsWith(view, emptyView) then\n\
+            return 6\n\
+        end\n\
+        if (readUInt16BigEndian(maximumView, 1) ?? 0) ~= 65535 or (readUInt32LittleEndian(maximumView, 1) ?? 0) ~= 4294967295 or (readUInt64BigEndian(maximumView, 1) ?? 0) ~= 18446744073709551615 then\n\
+            return 7\n\
+        end\n\
+        if readUInt64BigEndian(view, 2) ~= nil or readUInt16BigEndian(view, 9223372036854775807) ~= nil or indexOf(emptyView, 0, 1) ~= nil then\n\
+            return 8\n\
+        end\n\
+        return 42\n\
+    end\n";
+
+const PORTABLE_BYTES_EXACT_VIEW_FIXTURE: &str = "\n\
+    @pop_test_bytes_payloads = private constant [48 x i8] [\
+        i8 1, i8 2, i8 3, i8 4, i8 255, i8 0, i8 128, i8 64,\
+        i8 1, i8 2, i8 3, i8 4, i8 255, i8 0, i8 128, i8 64,\
+        i8 1, i8 2, i8 0, i8 0, i8 0, i8 0, i8 0, i8 0,\
+        i8 128, i8 64, i8 0, i8 0, i8 0, i8 0, i8 0, i8 0,\
+        i8 0, i8 0, i8 0, i8 0, i8 0, i8 0, i8 0, i8 0,\
+        i8 255, i8 255, i8 255, i8 255, i8 255, i8 255, i8 255, i8 255\
+    ]\n\
+    @pop_test_bytes_lengths = private constant [6 x i64] [i64 8, i64 8, i64 2, i64 2, i64 0, i64 8]\n\
+    define { i64, i64 } @pop_rt_bytes_view_lengths(i64 %token) nounwind {\n\
+    entry:\n\
+        %slot = sub i64 %token, 1\n\
+        %pointer = getelementptr [6 x i64], ptr @pop_test_bytes_lengths, i64 0, i64 %slot\n\
+        %length = load i64, ptr %pointer\n\
+        %with_bytes = insertvalue { i64, i64 } undef, i64 %length, 0\n\
+        %result = insertvalue { i64, i64 } %with_bytes, i64 %length, 1\n\
+        ret { i64, i64 } %result\n\
+    }\n\
+    define { i1, i8 } @pop_rt_bytes_view_get(i64 %token, i64 %offset, i64 %length, i64 %index) nounwind {\n\
+    entry:\n\
+        %after_start = icmp sge i64 %index, 1\n\
+        %before_end = icmp sle i64 %index, %length\n\
+        %present = and i1 %after_start, %before_end\n\
+        br i1 %present, label %read, label %absent\n\
+    read:\n\
+        %token_index = sub i64 %token, 1\n\
+        %token_offset = mul i64 %token_index, 8\n\
+        %view_offset = add i64 %token_offset, %offset\n\
+        %zero_index = sub i64 %index, 1\n\
+        %payload_index = add i64 %view_offset, %zero_index\n\
+        %pointer = getelementptr [48 x i8], ptr @pop_test_bytes_payloads, i64 0, i64 %payload_index\n\
+        %value = load i8, ptr %pointer\n\
+        %with_presence = insertvalue { i1, i8 } undef, i1 true, 0\n\
+        %result = insertvalue { i1, i8 } %with_presence, i8 %value, 1\n\
+        ret { i1, i8 } %result\n\
+    absent:\n\
+        ret { i1, i8 } zeroinitializer\n\
+    }\n";
+
+#[test]
+fn emitted_llvm_executes_portable_bytes_inspection_and_endian_reads() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(4)
+        .expect("backend crate is under the repository root");
+    let bytes_source = fs::read_to_string(root.join("crates/libraries/standard/pop/src/bytes.pop"))
+        .expect("read Pop.Bytes source");
+    let modules = [
+        ("src/bytes.pop", bytes_source.as_str()),
+        ("src/main.pop", PORTABLE_BYTES_CONSUMER),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (path, text))| {
+        let raw = u32::try_from(index).expect("Bytes Module count");
+        FrontEndModule::new(
+            ModuleId::from_raw(raw),
+            SourceFile::new(FileId::from_raw(raw), path, text).expect("Bytes source"),
+        )
+    })
+    .collect();
+    let front_end = analyze_bubble(FrontEndBubbleInput::new(
+        BubbleId::from_raw(0),
+        NamespaceId::from_raw(0),
+        Vec::new(),
+        modules,
+    ));
+    assert!(
+        front_end.diagnostics().is_empty(),
+        "{}",
+        front_end.diagnostic_snapshot()
+    );
+    let hir = front_end.hir().expect("Bytes HIR");
+    let entry = hir
+        .functions()
+        .iter()
+        .find(|function| function.name() == "inspect")
+        .expect("Bytes inspect entry")
+        .symbol();
+    let mir = lower_hir_bubble(hir, front_end.types()).expect("Bytes MIR");
+    let mut llvm = lower_mir_to_llvm_ir(
+        &mir,
+        front_end.types(),
+        &target(),
+        LlvmLoweringOptions::default(),
+    )
+    .expect("Bytes LLVM")
+    .to_string();
+    llvm = llvm
+        .replace(
+            "declare { i64, i64 } @pop_rt_bytes_view_lengths(i64) nounwind\n",
+            "",
+        )
+        .replace(
+            "declare { i1, i8 } @pop_rt_bytes_view_get(i64, i64, i64, i64) nounwind\n",
+            "",
+        );
+    llvm.push_str(PORTABLE_BYTES_EXACT_VIEW_FIXTURE);
+    let fixture = format!(
+        "#include <stdint.h>\n\
+         #include <stdlib.h>\n\
+         uint8_t pop_rt_gc_safe_point(uint32_t point, uint64_t *roots, uint64_t count) {{\n\
+             (void)point; (void)roots; (void)count; return 1;\n\
+         }}\n\
+         void pop_rt_trap(void) {{ abort(); }}\n\
+         extern int64_t pop_b0_s{symbol}(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);\n\
+         int main(void) {{ return (int)pop_b0_s{symbol}(1, 2, 3, 4, 5, 6); }}\n",
+        symbol = entry.raw()
+    );
+    let result = link_llvm_with_c_fixture(&llvm, &fixture, "portable-bytes");
+    assert!(
+        result.status.code() == Some(42),
+        "LLVM Bytes fixture failed with {:?}:\n{llvm}",
+        result.status.code()
+    );
+}
+
+#[test]
 fn emitted_llvm_preserves_portable_power_overflow() {
     let module = native_modules(&[
         (

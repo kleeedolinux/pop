@@ -297,6 +297,28 @@ fn analyze_standard_foundation_contribution() -> FrontEndResult {
         assert!(standard_hir.public_symbols().contains(&function.symbol()));
         assert!(function.type_parameters().is_empty());
     }
+    for function_name in [
+        "equals",
+        "compare",
+        "startsWith",
+        "endsWith",
+        "contains",
+        "indexOf",
+        "readUInt16BigEndian",
+        "readUInt16LittleEndian",
+        "readUInt32BigEndian",
+        "readUInt32LittleEndian",
+        "readUInt64BigEndian",
+        "readUInt64LittleEndian",
+    ] {
+        let function = standard_hir
+            .functions()
+            .iter()
+            .find(|function| function.name() == function_name)
+            .unwrap_or_else(|| panic!("ordinary Pop Bytes.{function_name} implementation"));
+        assert!(standard_hir.public_symbols().contains(&function.symbol()));
+        assert!(function.type_parameters().is_empty());
+    }
     assert!(
         standard_hir
             .functions()
@@ -309,7 +331,7 @@ fn analyze_standard_foundation_contribution() -> FrontEndResult {
     let documentation = standard.checked_documentation();
     assert_eq!(
         documentation.len(),
-        46,
+        58,
         "every portable public API is documented"
     );
     let mut examples = Vec::new();

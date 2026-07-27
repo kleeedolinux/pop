@@ -117,6 +117,48 @@ fn exact_view_surface_preserves_parameter_lender_provenance() {
 }
 
 #[test]
+fn scalar_loops_over_view_parameters_infer_no_retention() {
+    let result = analyze(
+        "namespace Main\n\
+         public function find(view: Bytes.View, byte: Byte): Int?\n\
+             local index = 1\n\
+             local length = Bytes.length(view)\n\
+             while index <= length do\n\
+                 local current = Bytes.get(view, index)?\n\
+                 if current == byte then\n\
+                     return index\n\
+                 end\n\
+                 index += 1\n\
+             end\n\
+             return nil\n\
+         end\n\
+         public function consume(bytes: Bytes, byte: Byte): Int?\n\
+             return find(Bytes.view(bytes), byte)\n\
+         end\n",
+    );
+
+    assert!(
+        result.diagnostics().is_empty(),
+        "{}\n{:#?}",
+        result.diagnostic_snapshot(),
+        result.diagnostics()
+    );
+    let function = result
+        .hir()
+        .expect("looping view HIR")
+        .functions()
+        .first()
+        .expect("find function");
+    assert_eq!(
+        function.lifetime_summary().parameter_retention(),
+        &[
+            pop_types::ParameterRetention::DoesNotRetain,
+            pop_types::ParameterRetention::MayRetain
+        ]
+    );
+}
+
+#[test]
 fn views_fail_closed_for_escape_retention_suspension_and_ffi() {
     let cases = [
         (

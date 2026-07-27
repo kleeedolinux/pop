@@ -37,7 +37,7 @@ fn sequence_callbacks_are_invoked_once_per_loop_item() {
 fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
     let baseline = standard_api_baseline().expect("valid embedded API baseline");
     assert_eq!(baseline.schema_version(), 1);
-    assert_eq!(baseline.entries().len(), 115);
+    assert_eq!(baseline.entries().len(), 127);
 
     let prelude_names = baseline
         .entries()
@@ -60,12 +60,12 @@ fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
         .filter(|entry| entry.status() == ApiStatus::Prototype)
         .map(|entry| entry.identity())
         .collect::<Vec<_>>();
-    assert_eq!(prototypes.len(), 50);
+    assert_eq!(prototypes.len(), 62);
     assert_eq!(
         &prototypes[..4],
         ["namespace:0", "namespace:1", "function:0", "function:1"]
     );
-    assert_eq!(prototypes.last(), Some(&"api:61"));
+    assert_eq!(prototypes.last(), Some(&"api:73"));
 
     let portable_names = baseline
         .entries()
@@ -138,6 +138,18 @@ fn frozen_standard_api_baseline_has_exact_prelude_and_prototype_boundaries() {
             ("Pop.Math", "power"),
             ("Pop.Math", "floorDivide"),
             ("Pop.Math", "floorRemainder"),
+            ("Pop.Bytes", "equals"),
+            ("Pop.Bytes", "compare"),
+            ("Pop.Bytes", "startsWith"),
+            ("Pop.Bytes", "endsWith"),
+            ("Pop.Bytes", "contains"),
+            ("Pop.Bytes", "indexOf"),
+            ("Pop.Bytes", "readUInt16BigEndian"),
+            ("Pop.Bytes", "readUInt16LittleEndian"),
+            ("Pop.Bytes", "readUInt32BigEndian"),
+            ("Pop.Bytes", "readUInt32LittleEndian"),
+            ("Pop.Bytes", "readUInt64BigEndian"),
+            ("Pop.Bytes", "readUInt64LittleEndian"),
         ]
     );
 }

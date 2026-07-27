@@ -1332,7 +1332,9 @@ fn foundation_libraries_are_partitioned_by_contributor_ownership() {
         "standard/pop/bubble.toml",
         "standard/pop/src/lib.pop",
         "standard/pop/src/math.pop",
+        "standard/pop/src/bytes.pop",
         "standard/pop/src/sequence.pop",
+        "standard/tests/bytes.rs",
         "internal/src/runtime.rs",
         "internal/tests/runtime.rs",
         "internal/pop/bubble.toml",
@@ -1615,6 +1617,57 @@ fn portable_integer_math_has_one_pop_implementation() {
             "Pop.Math must own `{function}` as ordinary Pop source"
         );
     }
+}
+
+#[test]
+fn portable_bytes_inspection_has_one_pop_implementation() {
+    let root = repository_root();
+    let standard = fs::read_to_string(root.join("crates/libraries/standard/src/lib.rs"))
+        .expect("read Pop.Standard Rust module inventory");
+    let bytes_path = root.join("crates/libraries/standard/pop/src/bytes.pop");
+
+    assert!(!standard.contains("pub mod bytes;"));
+    assert!(!root.join("crates/libraries/standard/src/bytes.rs").exists());
+    let bytes = fs::read_to_string(&bytes_path).expect("read Pop.Bytes source");
+    for function in [
+        "equals",
+        "compare",
+        "startsWith",
+        "endsWith",
+        "contains",
+        "indexOf",
+        "readUInt16BigEndian",
+        "readUInt16LittleEndian",
+        "readUInt32BigEndian",
+        "readUInt32LittleEndian",
+        "readUInt64BigEndian",
+        "readUInt64LittleEndian",
+    ] {
+        assert!(
+            bytes.contains(&format!("public function {function}(")),
+            "Pop.Bytes must own `{function}` as ordinary Pop source"
+        );
+    }
+    for forbidden in [
+        "Bytes.toBytes(",
+        "Dynamic",
+        "Any",
+        "@Ffi.",
+        "extern ",
+        "unsafe",
+    ] {
+        assert!(
+            !bytes.contains(forbidden),
+            "portable Pop.Bytes source contains forbidden `{forbidden}`"
+        );
+    }
+
+    let tooling = fs::read_to_string(root.join("crates/compiler/driver/src/tooling.rs"))
+        .expect("read tooling Standard source inventory");
+    assert!(
+        tooling.contains("libraries/standard/pop/src/bytes.pop"),
+        "editor tooling must analyze the public Bytes Module"
+    );
 }
 
 #[test]
